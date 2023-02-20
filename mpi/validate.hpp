@@ -503,8 +503,7 @@ public:
  * of pred to contain the BFS level number (or -1 if not visited) of each
  * vertex; this is based on the predecessor map if the user didn't provide it.
  * */
-template <typename EdgeList>
-bool validate(EdgeList* edge_list, const int64_t root, int64_t* const pred, int64_t* const edge_visit_count_ptr)
+bool validate(PredGather* pred_gather, const int64_t root, int64_t* const pred, int64_t* const edge_visit_count_ptr)
 {
   assert (pred);
   *edge_visit_count_ptr = 0; /* Ensure it is a valid pointer */
@@ -592,103 +591,15 @@ bool validate(EdgeList* edge_list, const int64_t root, int64_t* const pred, int6
 	memset(pred_valid, 0, nlocalverts * sizeof(unsigned char));
 	int64_t edge_visit_count = 0;
 
-	typedef typename EdgeList::edge_type EdgeType;
-	int num_loops = edge_list->beginRead(false);
+  int num_loops = (pred_gather->get_max_num_edges() + chunksize_ - 1) / chunksize_;
+  pred_gather->begin_gather(pred);
+
+	int64_t* restrict edge_data = (int64_t*)cache_aligned_xmalloc(2 * chunksize_ * sizeof(int64_t));
+	int64_t* restrict edge_preds = (int64_t*)cache_aligned_xmalloc(2 * chunksize_ * sizeof(int64_t));
 
 	for(int loop_count = 0; loop_count < num_loops && error_counts == 0; ++loop_count) {
-		EdgeType* edge_data;
-		const int bufsize = edge_list->read(&edge_data);
-		assert (bufsize <= chunksize_);
-		//begin_gather(pred_win);
-		int* restrict local_indices_r = (int*)cache_aligned_xmalloc(chunksize_ * sizeof(int));
-		int* restrict remote_indices_r = (int*)page_aligned_xmalloc(chunksize_ * sizeof(int));
-		int* restrict local_indices_c = (int*)cache_aligned_xmalloc(chunksize_ * sizeof(int));
-		int* restrict remote_indices_c = (int*)page_aligned_xmalloc(chunksize_ * sizeof(int));
-#pragma omp parallel
-		{
-			int *count_r = scatter_r.get_counts();
-			int *count_c = scatter_c.get_counts();
 
-			// *** : schedule(static) is important.
-#pragma omp for schedule(static) // ***
-			for (int i = 0; i < bufsize; ++i) {
-				int64_t v0 = edge_data[i].v0();
-				int64_t v1 = edge_data[i].v1();
-				(count_r[vertex_owner_c(v0)])++;
-				assert (vertex_owner_r(v0) == mpi.rank_2dr);
-				(count_c[vertex_owner_r(v1)])++;
-				assert (vertex_owner_c(v1) == mpi.rank_2dc);
-			} // #pragma omp for (there is implicit barrier on exit)
-#if defined(__INTEL_COMPILER)
-#pragma omp barrier
-#endif
-
-#pragma omp master
-			{
-				scatter_r.sum();
-				scatter_c.sum();
-				assert (scatter_r.get_send_count() == bufsize);
-				assert (scatter_c.get_send_count() == bufsize);
-			} // #pragma omp master
-#pragma omp barrier
-			;
-			int* offsets_r = scatter_r.get_offsets();
-			int* offsets_c = scatter_c.get_offsets();
-#pragma omp for schedule(static) // ***
-			for (int i = 0; i < bufsize; ++i) {
-				int64_t v0 = edge_data[i].v0();
-				int64_t v1 = edge_data[i].v1();
-				int v0_pos = offsets_r[vertex_owner_c(v0)]++;
-				local_indices_r[i] = v0_pos;
-				remote_indices_r[v0_pos] = vertex_local(v0);
-				int v1_pos = offsets_c[vertex_owner_r(v1)]++;
-				local_indices_c[i] = v1_pos;
-				remote_indices_c[v1_pos] = vertex_local(v1);
-			  //add_gather_request(pred_win, i * 2 + 0, edge_owner[i * 2 + 0], edge_local[i * 2 + 0], i * 2 + 0);
-			  //add_gather_request(pred_win, i * 2 + 1, edge_owner[i * 2 + 1], edge_local[i * 2 + 1], i * 2 + 1);
-			}
-		} // #pragma omp parallel
-		int* restrict reply_indices_r = scatter_r.scatter(remote_indices_r);
-		int recv_count_r = scatter_r.get_recv_count();
-		int* restrict reply_indices_c = scatter_c.scatter(remote_indices_c);
-		int recv_count_c = scatter_c.get_recv_count();
-		free(remote_indices_r); remote_indices_r = NULL;
-		free(remote_indices_c); remote_indices_c = NULL;
-		int64_t* restrict reply_data_r = (int64_t*)page_aligned_xmalloc(recv_count_r * sizeof(int64_t));
-		int64_t* restrict reply_data_c = (int64_t*)page_aligned_xmalloc(recv_count_c * sizeof(int64_t));
-
-#pragma omp parallel for
-		for (int i = 0; i < recv_count_r; ++i) {
-			reply_data_r[i] = pred[reply_indices_r[i]];
-		}
-#pragma omp parallel for
-		for (int i = 0; i < recv_count_c; ++i) {
-			reply_data_c[i] = pred[reply_indices_c[i]];
-		}
-
-		scatter_r.free(reply_indices_r); reply_indices_r = NULL;
-		scatter_c.free(reply_indices_c); reply_indices_c = NULL;
-		assert (scatter_r.get_send_count() == bufsize);
-		assert (scatter_c.get_send_count() == bufsize);
-		int64_t* restrict recv_pred_r = scatter_r.gather(reply_data_r);
-		int64_t* restrict recv_pred_c = scatter_c.gather(reply_data_c);
-		free(reply_data_r); reply_data_r = NULL;
-		free(reply_data_c); reply_data_c = NULL;
-
-		int64_t* restrict edge_preds = (int64_t*)cache_aligned_xmalloc(2 * chunksize_ * sizeof(int64_t));
-
-#pragma omp parallel for
-		for (int i = 0; i < bufsize; ++i) {
-			assert (local_indices_r[i] < bufsize);
-			assert (local_indices_c[i] < bufsize);
-			edge_preds[2*i+0] = recv_pred_r[local_indices_r[i]];
-			edge_preds[2*i+1] = recv_pred_c[local_indices_c[i]];
-		}
-		//end_gather(pred_win);
-		free(local_indices_r); local_indices_r = NULL;
-		free(local_indices_c); local_indices_c = NULL;
-		scatter_r.free(recv_pred_r); recv_pred_r = NULL;
-		scatter_r.free(recv_pred_c); recv_pred_c = NULL;
+    int bufsize = pred_gather->get_edge_preds(edge_data, edge_preds, chunksize_ * loop_count, chunksize_);
 
 		//begin_scatter_constant(pred_valid_win);
 		MPI_Aint* restrict remote_valid_indices_r = (MPI_Aint*)page_aligned_xmalloc(chunksize_ * sizeof(MPI_Aint));
@@ -702,8 +613,8 @@ bool validate(EdgeList* edge_list, const int64_t root, int64_t* const pred, int6
 			// *** : schedule(static) is important.
 #pragma omp for schedule(static) reduction(+:edge_visit_count) // ***
 			for (int i = 0; i < bufsize; ++i) {
-			  int64_t src = edge_data[i].v0();
-			  int64_t tgt = edge_data[i].v1();
+			  int64_t src = edge_data[i * 2 + 0];
+			  int64_t tgt = edge_data[i * 2 + 1];
 			  uint16_t src_depth = get_depth_from_pred_entry(edge_preds[i * 2 + 0]);
 			  uint16_t tgt_depth = get_depth_from_pred_entry(edge_preds[i * 2 + 1]);
 			  if (src_depth != UINT16_MAX && tgt_depth == UINT16_MAX) {
@@ -741,8 +652,8 @@ bool validate(EdgeList* edge_list, const int64_t root, int64_t* const pred, int6
 			int* offsets_c = scatter_c.get_offsets();
 #pragma omp for schedule(static) // ***
 			for (int i = 0; i < bufsize; ++i) {
-			  int64_t src = edge_data[i].v0();
-			  int64_t tgt = edge_data[i].v1();
+			  int64_t src = edge_data[i * 2 + 0];
+			  int64_t tgt = edge_data[i * 2 + 1];
 			  if (get_pred_from_pred_entry(edge_preds[i * 2 + 0]) == tgt) {
 				  remote_valid_indices_r[offsets_r[vertex_owner_c(src)]++] = vertex_local(src);
 			  }
@@ -753,9 +664,9 @@ bool validate(EdgeList* edge_list, const int64_t root, int64_t* const pred, int6
 		} // #pragma omp parallel
 
 		MPI_Aint* restrict recv_valid_indices_r = scatter_r.scatter(remote_valid_indices_r);
-		recv_count_r = scatter_r.get_recv_count();
+		int recv_count_r = scatter_r.get_recv_count();
 		MPI_Aint* restrict recv_valid_indices_c = scatter_c.scatter(remote_valid_indices_c);
-		recv_count_c = scatter_c.get_recv_count();
+		int recv_count_c = scatter_c.get_recv_count();
 		free(remote_valid_indices_r); remote_valid_indices_r = NULL;
 		free(remote_valid_indices_c); remote_valid_indices_c = NULL;
 
@@ -770,10 +681,12 @@ bool validate(EdgeList* edge_list, const int64_t root, int64_t* const pred, int6
 
 		MPI_Free_mem(recv_valid_indices_r);
 		MPI_Free_mem(recv_valid_indices_c);
-		free(edge_preds); edge_preds = NULL;
 		//end_scatter_constant(pred_valid_win);
 	}
-	edge_list->endRead();
+	free(edge_data); edge_data = NULL;
+	free(edge_preds); edge_preds = NULL;
+
+	pred_gather->end_gather();
 	//destroy_gather(pred_win);
 
 	//destroy_scatter_constant(pred_valid_win);
@@ -1005,17 +918,16 @@ int64_t chunksize_;
  * of pred to contain the BFS level number (or -1 if not visited) of each
  * vertex; this is based on the predecessor map if the user didn't provide it.
  * */
-template <typename EdgeList>
 int validate_bfs_result(
-	EdgeList* edge_list,
+	PredGather* pred_gather,
 	const int64_t nglobalverts,
 	const int64_t nlocalverts,
 	const int64_t root,
 	int64_t* const pred,
 	int64_t* const edge_visit_count_ptr)
 {
-	BfsValidation validation(nglobalverts, nlocalverts, EdgeList::CHUNK_SIZE);
-	return validation.validate(edge_list, root, pred, edge_visit_count_ptr);
+	BfsValidation validation(nglobalverts, nlocalverts, 8*1024*1024);
+	return validation.validate(pred_gather, root, pred, edge_visit_count_ptr);
 }
 
 

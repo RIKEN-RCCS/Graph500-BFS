@@ -243,6 +243,11 @@ public:
 				1, MPI_INT64_T, MPI_MAX, MPI_COMM_WORLD);
 	}
 
+	int64_t getEdgeMemory(EdgeType** pp_buffer) {
+		*pp_buffer = edge_memory_;
+		return edge_filled_size_;
+	}
+
 	int64_t num_local_edges() { return num_local_edges_; }
 	bool data_is_in_file() { return data_in_file_; }
 	const char* get_filepath() { return filepath_; }

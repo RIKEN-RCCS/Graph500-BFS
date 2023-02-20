@@ -20,6 +20,7 @@ int inline vertex_owner_c(int64_t v) { return (v / mpi.size_2dr) % mpi.size_2dc;
 int inline edge_owner(int64_t v0, int64_t v1) { return vertex_owner_r(v0) + vertex_owner_c(v1) * mpi.size_2dr; }
 int inline vertex_owner(int64_t v) { return v % mpi.size_2d; }
 int64_t inline vertex_local(int64_t v) { return v / mpi.size_2d; }
+int64_t compose_vertex(int owner, int64_t local) { return owner + local * mpi.size_2d; }
 
 class Graph2DCSR
 {
@@ -33,7 +34,7 @@ public:
 	, row_sums_(NULL)
 	, has_edge_bitmap_(NULL)
 	, reorder_map_(NULL)
-        , degree_(NULL)
+	, degree_(NULL)
 	, orig_vertexes_(NULL)
 	, edge_array_(NULL)
 	, row_starts_(NULL)
@@ -54,7 +55,7 @@ public:
 		free(row_bitmap_); row_bitmap_ = NULL;
 		free(row_sums_); row_sums_ = NULL;
 		free(reorder_map_); reorder_map_ = NULL;
-                free(degree_); degree_ = NULL;
+		free(degree_); degree_ = NULL;
 		free(invert_map_); invert_map_ = NULL;
 		MPI_Free_mem(orig_vertexes_); orig_vertexes_ = NULL;
 		free(has_edge_bitmap_); has_edge_bitmap_ = NULL;
@@ -110,6 +111,68 @@ public:
 		}
 		return false;
 	}
+
+	void save_in_file(const char* prefix) {
+		if(prefix == nullptr) return;
+
+		auto save = [&](const char* name, void* data, size_t sz) {
+			char filepath[256];
+			sprintf(filepath, "%s-%03d.%s", prefix, mpi.rank_2d, name);
+			FILE* fp = fopen(filepath, "wb");
+			if(fp == nullptr) {
+				throw_exception("Failed to open file (write): %s", filepath);
+			}
+			if(fwrite(data, 1, sz, fp) != sz) {
+				throw_exception("Failed to write file %z bytes", sz);
+			}
+			fclose(fp);
+		};
+
+		int64_t local_bitmap_width = num_local_verts_ / PRM::NBPE;
+		int64_t src_bitmap_size = local_bitmap_width * mpi.size_2dc;
+		int64_t non_zero_rows = row_sums_[src_bitmap_size];
+		int64_t num_edges = row_starts_[non_zero_rows];
+
+		save("edge_array", edge_array_, num_edges * sizeof(int64_t));
+		save("row_starts", row_starts_, (non_zero_rows + 1) * sizeof(int64_t));
+		save("isolated_edges", isolated_edges_, non_zero_rows * sizeof(int64_t));
+		
+		free(edge_array_); edge_array_ = NULL;
+		free(row_starts_); row_starts_ = NULL;
+		free(isolated_edges_); isolated_edges_ = NULL;
+	}
+
+	void restore_from_file(const char* prefix) {
+		if(prefix == nullptr) return;
+
+		auto load = [&](const char* name, void* data, size_t sz) {
+			char filepath[256];
+			sprintf(filepath, "%s-%03d.%s", prefix, mpi.rank_2d, name);
+			FILE* fp = fopen(filepath, "rb");
+			if(fp == nullptr) {
+				throw_exception("Failed to open file (read): %s", filepath);
+			}
+			if(fread(data, 1, sz, fp) != sz) {
+				throw_exception("Failed to read file %z bytes", sz);
+			}
+			fclose(fp);
+		};
+		
+		int64_t local_bitmap_width = num_local_verts_ / PRM::NBPE;
+		int64_t src_bitmap_size = local_bitmap_width * mpi.size_2dc;
+		int64_t non_zero_rows = row_sums_[src_bitmap_size];
+
+		row_starts_ = static_cast<int64_t*>(cache_aligned_xcalloc((non_zero_rows + 1) * sizeof(int64_t)));
+		isolated_edges_ = static_cast<int64_t*>(cache_aligned_xcalloc(non_zero_rows * sizeof(int64_t)));
+
+		load("row_starts", row_starts_, (non_zero_rows + 1) * sizeof(int64_t));
+		load("isolated_edges", isolated_edges_, non_zero_rows * sizeof(int64_t));
+		
+		int64_t num_edges = row_starts_[non_zero_rows];
+
+		edge_array_ = static_cast<int64_t*>(cache_aligned_xcalloc(num_edges * sizeof(int64_t)));
+		load("edge_array", edge_array_, num_edges * sizeof(int64_t));
+	}
 //private:
 
 	// Array Indices:
@@ -123,7 +186,7 @@ public:
 	TwodVertex* row_sums_; // Index: SBI
 	BitmapType* has_edge_bitmap_; // for every local vertices, Index: SBI
 	LocalVertex* reorder_map_; // Index: Pred
-        int64_t* degree_;
+	int64_t* degree_;
 	LocalVertex* invert_map_; // Index: Reordered Pred
 	LocalVertex* orig_vertexes_; // Index: CSI
 

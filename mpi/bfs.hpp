@@ -123,8 +123,8 @@ public:
 		constructor.construct(edge_list, log_local_verts_unit, graph_);
 	}
 
-         void prepare_bfs(int validation_level, bool pre_exec, bool real_benchmark) {
-                printInformation(validation_level, pre_exec, real_benchmark);
+	void prepare_bfs(int validation_level, bool pre_exec, bool real_benchmark) {
+		printInformation(validation_level, pre_exec, real_benchmark);
 		allocate_memory();
 	}
 

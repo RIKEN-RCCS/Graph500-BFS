@@ -26,8 +26,8 @@
 #include "utils.hpp"
 #include "../generator/graph_generator.hpp"
 #include "graph_constructor.hpp"
-#include "validate.hpp"
 #include "benchmark_helper.hpp"
+#include "validate.hpp"
 #include "bfs.hpp"
 #include "bfs_cpu.hpp"
 #if CUDA_ENABLED
@@ -333,27 +333,41 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta, int vali
 	if(mpi.isMaster() && root_start != 0)
 		print_with_prefix("Resume from %d th run", root_start);
 
-	EdgeListStorage<UnweightedPackedEdge, 8*1024*1024> edge_list(
+	auto edge_list = new EdgeListStorage<UnweightedPackedEdge, 8*1024*1024>(
 			(int64_t(1) << SCALE) * edgefactor / mpi.size_2d, getenv("TMPFILE"));
 
 	BfsOnCPU::printInformation(validation_level, pre_exec, real_benchmark);
 
 	if(mpi.isMaster()) print_with_prefix("Graph generation");
 	double generation_time = MPI_Wtime();
-	generate_graph_spec2010(&edge_list, SCALE, edgefactor);
+	generate_graph_spec2010(edge_list, SCALE, edgefactor);
 	generation_time = MPI_Wtime() - generation_time;
 
 	if(mpi.isMaster()) print_with_prefix("Graph construction");
 	// Create BFS instance and the *COMMUNICATION THREAD*.
 	BfsOnCPU* benchmark = new BfsOnCPU();
 	double construction_time = MPI_Wtime();
-	benchmark->construct(&edge_list);
+	benchmark->construct(edge_list);
 	construction_time = MPI_Wtime() - construction_time;
+
+	if(mpi.isMaster()) print_with_prefix("Save graph in file temporally...");
+	// メモリを空けるためグラフデータの一部を一時的にファイルに保存
+	benchmark->graph_.save_in_file(getenv("TMPFILE2"));
 
 	if(mpi.isMaster()) print_with_prefix("Redistributing edge list...");
 	double redistribution_time = MPI_Wtime();
-	redistribute_edge_2d(&edge_list);
+	redistribute_edge_2d(edge_list);
 	redistribution_time = MPI_Wtime() - redistribution_time;
+
+	if(mpi.isMaster()) print_with_prefix("Prepare fast validation...");
+	PredGather pred_gather;
+	pred_gather.init(edge_list);
+
+	// validatioにはedge_listの代わりにpred_gatherを使用するので、edge_listを解放
+	delete edge_list; edge_list = nullptr;
+	
+	if(mpi.isMaster()) print_with_prefix("Restore graph from file...");
+	benchmark->graph_.restore_from_file(getenv("TMPFILE2"));
 
 	int64_t bfs_roots[num_bfs_roots];
 	const int64_t max_used_vertex = find_max_used_vertex(benchmark->graph_);
@@ -516,11 +530,11 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta, int vali
 		validate_times[i] = MPI_Wtime();
 		int64_t edge_visit_count = 0;
                 if(validation_level == 2){
-                  result_ok = validate_bfs_result(&edge_list, max_used_vertex + 1, nlocalverts, bfs_roots[i], pred, &edge_visit_count);
+                  result_ok = validate_bfs_result(&pred_gather, max_used_vertex + 1, nlocalverts, bfs_roots[i], pred, &edge_visit_count);
                 }
                 else if(validation_level == 1){
                   if(i == 0) {
-			result_ok = validate_bfs_result(&edge_list, max_used_vertex + 1, nlocalverts, bfs_roots[i], pred, &edge_visit_count);
+			result_ok = validate_bfs_result(&pred_gather, max_used_vertex + 1, nlocalverts, bfs_roots[i], pred, &edge_visit_count);
 			pf_nedge[SCALE] = edge_visit_count;
                   }
                   else {

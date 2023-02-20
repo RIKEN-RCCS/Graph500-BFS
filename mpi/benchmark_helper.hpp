@@ -513,4 +513,206 @@ void init_log(int SCALE, int edgefactor, double gen_time, double cons_time, doub
 	log->num_runs = 0;
 }
 
+class PredGather
+{
+public:
+	PredGather()
+		: num_edges(), scatter_r(mpi.comm_2dr), scatter_c(mpi.comm_2dc)
+	{ }
+
+	~PredGather()
+	{
+		clean();
+	}
+
+	void clean()
+	{
+		free(send_r); send_r = NULL;
+		free(send_c); send_c = NULL;
+		free(indexes_r); indexes_r = NULL;
+		free(indexes_c); indexes_c = NULL;
+	}
+
+	template <typename EdgeList>
+	void init(EdgeList* edge_list, typename EdgeList::edge_type::no_weight dummy = 0)
+	{
+		typename EdgeList::edge_type* edge_memory = nullptr;
+		int64_t num_edges_ = edge_list->getEdgeMemory(&edge_memory);
+
+		if(num_edges_ > INT_MAX) {
+			throw_exception("num_edges exceeds INT_MAX");
+		}
+		
+		num_edges = (int)num_edges_;
+		MPI_Allreduce(&num_edges, &max_num_edges, 1, MPI_INT, MPI_MAX, mpi.comm_2d);
+
+		make_unique_vertexes(
+			[&](int i) { return edge_memory[i].v0(); },
+			[](int64_t v) { return vertex_owner_c(v); }, 
+			scatter_r, send_r, indexes_r, vertexes_r);
+		
+		make_unique_vertexes(
+			[&](int i) { return edge_memory[i].v1(); },
+			[](int64_t v) { return vertex_owner_r(v); }, 
+			scatter_c, send_c, indexes_c, vertexes_c);
+
+		print_memory_size();
+	}
+
+	void begin_gather(int64_t* pred)
+	{
+		pred_r = gather_pred(pred, send_r, scatter_r);
+		pred_c = gather_pred(pred, send_c, scatter_c);
+	}
+
+	int get_edge_preds(int64_t* edge_data, int64_t* edge_preds, int offset, int num)
+	{
+		num = std::min(num_edges - offset, num);
+#pragma omp parallel for
+		for(int i = 0; i < num; ++i) {
+			edge_data[i * 2 + 0] = vertexes_r[indexes_r[i + offset]];
+			edge_data[i * 2 + 1] = vertexes_c[indexes_c[i + offset]];
+		}
+#pragma omp parallel for
+		for(int i = 0; i < num; ++i) {
+			edge_preds[i * 2 + 0] = pred_r[indexes_r[i + offset]];
+			edge_preds[i * 2 + 1] = pred_c[indexes_c[i + offset]];
+		}
+		return num;
+	}
+
+	void end_gather()
+	{
+		free(pred_r); pred_r = nullptr;
+		free(pred_c); pred_c = nullptr;
+	}
+
+	int get_max_num_edges() const { return max_num_edges; }
+
+private:
+	int num_edges;
+	int max_num_edges;
+
+	ScatterContext scatter_r;
+	ScatterContext scatter_c;
+
+	// Predを送信するローカル頂点番号
+	int* send_r;
+	int* send_c;
+
+	// エッジデータから変換したインデックスデータ
+	int* indexes_r;
+	int* indexes_c;
+
+	// ユニーク頂点情報
+	int64_t* vertexes_r;
+	int64_t* vertexes_c;
+
+	// 受け取ったPredデータ(begin～endまで有効)
+	int64_t* pred_r;
+	int64_t* pred_c;
+
+	void print_memory_size() {
+		int send_size = scatter_r.get_recv_count() + scatter_c.get_recv_count();
+		int unique_v_size = scatter_r.get_send_count() + scatter_c.get_send_count();
+		int64_t data_size[2] =  {
+			(int64_t)max_num_edges * 12,
+			(int64_t)num_edges * 8 + send_size * (int64_t)sizeof(int) + unique_v_size * (int64_t)sizeof(int64_t) * 2
+		};
+		int64_t recv_sum[2], recv_max[2];
+		MPI_Allreduce(data_size, recv_sum, 2, MpiTypeOf<int64_t>::type, MPI_SUM, mpi.comm_2d);
+		MPI_Allreduce(data_size, recv_max, 2, MpiTypeOf<int64_t>::type, MPI_MAX, mpi.comm_2d);
+		if(mpi.isMaster()) {
+			print_with_prefix("Local edge memory size: Max %f MB (+%f %% from avg)", 
+			to_mega(recv_max[0]), diff_percent(recv_max[0], recv_sum[0], mpi.size_2d));
+			print_with_prefix("Local pred gather size:Max %f MB (+%f %% from avg)", 
+			to_mega(recv_max[1]), diff_percent(recv_max[1], recv_sum[1], mpi.size_2d));
+		}
+	}
+
+	template <typename F, typename G>
+	void make_unique_vertexes(F edge_vertex, G owner_rc,
+		ScatterContext& scatter, int*& send, int*& indexes, int64_t*& vertexes)
+	{
+		int64_t* edge_vertexes = static_cast<int64_t*>(cache_aligned_xmalloc(num_edges * sizeof(int64_t)));
+		int* edge_indexes = static_cast<int*>(cache_aligned_xmalloc(num_edges * sizeof(int)));
+
+		auto swizzle = [](int64_t v) { return SeparatedId(vertex_owner(v), vertex_local(v), 40).value; };
+		auto unswizzle = [](int64_t v) { SeparatedId id(v); return compose_vertex(id.high(40), id.low(40)); };
+
+#pragma omp parallel for
+		for(int i = 0; i < num_edges; ++i) {
+			// プロセスごとに分けたいので、プロセス番号が上位ビットになるようにする
+			edge_vertexes[i] = swizzle(edge_vertex(i));
+			edge_indexes[i] = i;
+		}
+
+		if(mpi.isMaster()) print_with_prefix("Sorting edges...");
+
+		sort2(edge_vertexes, edge_indexes, num_edges);
+
+		if(mpi.isMaster()) print_with_prefix("Counting unique vertexes...");
+
+		// ユニーク頂点数を数える
+		int64_t prev = -1;
+		int64_t num_vertexes = 0;
+		for(int i = 0; i < num_edges; ++i) {
+			if(prev != edge_vertexes[i]) {
+				prev = edge_vertexes[i];
+				num_vertexes++;
+			}
+			edge_vertexes[i] = unswizzle(edge_vertexes[i]);
+		}
+
+		vertexes = static_cast<int64_t*>(cache_aligned_xmalloc(num_vertexes * sizeof(int64_t)));
+		indexes = static_cast<int*>(cache_aligned_xmalloc(num_edges * sizeof(int)));
+
+		// もう一度走査して、vertexes, indexesを作成
+		// vertexes: ユニーク頂点データ
+		// indexes: エッジからユニーク頂点番号を引くデータ
+		prev = -1;
+		num_vertexes = 0;
+		for(int i = 0; i < num_edges; ++i) {
+			if(prev != edge_vertexes[i]) {
+				vertexes[num_vertexes++] = prev = edge_vertexes[i];
+			}
+			indexes[edge_indexes[i]] = (num_vertexes - 1);
+		}
+
+		free(edge_vertexes); edge_vertexes = nullptr;
+		free(edge_indexes); edge_indexes = nullptr;
+
+		int* vertexes_local = static_cast<int*>(cache_aligned_xmalloc(num_vertexes * sizeof(int)));
+
+#pragma omp parallel
+		{
+			int* restrict counts = scatter.get_counts();
+
+#pragma omp for schedule(static)
+			for (int i = 0; i < num_vertexes; ++i) {
+				(counts[owner_rc(vertexes[i])])++;
+				vertexes_local[i] = (int)vertex_local(vertexes[i]);
+			} // #pragma omp for schedule(static)
+		}
+
+		scatter.sum();
+
+		send = scatter.scatter(vertexes_local);
+		
+		free(vertexes_local); vertexes_local = nullptr;
+	}
+
+	int64_t* gather_pred(int64_t* pred, int* send, ScatterContext& scatter) {
+		int num_send = scatter.get_recv_count();
+		int64_t* pred_send = static_cast<int64_t*>(cache_aligned_xmalloc(num_send * sizeof(int64_t)));
+#pragma omp parallel for
+		for(int i = 0; i < num_send; ++i) {
+			pred_send[i] = pred[send[i]];
+		}
+		int64_t* pred_recv = scatter.gather(pred_send);
+		free(pred_send);
+		return pred_recv;
+	}
+};
+
 #endif /* BENCHMARK_HELPER_HPP_ */
