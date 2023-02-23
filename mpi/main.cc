@@ -417,7 +417,7 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta, int vali
 	  int proposed_a2a_buf_size = (max_a2a_buf_size + a2a_buf_unit - 1) / a2a_buf_unit;
 	  print_with_prefix("Proposed A2A_BUF_SIZE is %d in parameters.h", proposed_a2a_buf_size);
 	  if(A2A_BUF_SIZE != proposed_a2a_buf_size)
-	    print_with_prefix("The memory size required for this execution can be changed from from %f GB to %f GB",
+	    print_with_prefix("The memory size for A2A_BUF_SIZE can be changed from %f GB to %f GB",
 			      to_giga(A2A_BUF_SIZE * a2a_buf_unit * 2), to_giga(proposed_a2a_buf_size * a2a_buf_unit * 2));
 	}
 
