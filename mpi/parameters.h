@@ -30,6 +30,8 @@
 #define PROFILING_MODE 0
 #define REPORT_GEN_RPGRESS 0
 
+#define A2A_BUF_SIZE 50
+
 // General Optimizations
 // 0: completely off, 1: only reduce isolated vertices, 2: sort by degree and reduce isolated vertices
 #ifndef VERTEX_REORDERING

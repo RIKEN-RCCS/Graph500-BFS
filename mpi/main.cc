@@ -19,7 +19,6 @@
 
 // C++ includes
 #include <string>
-
 #include "parameters.h"
 #include "utils_core.h"
 #include "primitives.hpp"
@@ -410,6 +409,17 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta, int vali
           if(mpi.isMaster())
             print_with_prefix("Elapsed Time for auto tuning = %f sec.", MPI_Wtime() - elapsed_time);
         }
+
+	int a2a_buf_size = max_num_buffers * PRM::COMM_BUFFER_SIZE;
+	int max_a2a_buf_size = 0;
+	MPI_Reduce(&a2a_buf_size, &max_a2a_buf_size, 1, MPI_INT, MPI_MAX, 0, MPI_COMM_WORLD);
+	if(mpi.isMaster()){
+	  int proposed_a2a_buf_size = (max_a2a_buf_size + a2a_buf_unit - 1) / a2a_buf_unit;
+	  print_with_prefix("Proposed A2A_BUF_SIZE is %d in parameters.h", proposed_a2a_buf_size);
+	  if(A2A_BUF_SIZE != proposed_a2a_buf_size)
+	    print_with_prefix("The memory size required for this execution can be changed from from %f GB to %f GB",
+			      to_giga(A2A_BUF_SIZE * a2a_buf_unit * 2), to_giga(proposed_a2a_buf_size * a2a_buf_unit * 2));
+	}
 
 	if(pre_exec){
 #ifdef _FUGAKU_POWER_MEASUREMENT

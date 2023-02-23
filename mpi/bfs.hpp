@@ -18,6 +18,8 @@
 static int current_expand = TD_EXPAND_TIME;
 int current_fold = TD_FOLD_TIME;
 #endif
+int64_t a2a_buf_unit = 0;
+int max_num_buffers = 0;
 #include "utils.hpp"
 #include "fiber.hpp"
 #include "abstract_comm.hpp"
@@ -181,7 +183,8 @@ public:
 		 * - communication buffer for asynchronous communication:
 		 */
 
-		size_t s = graph_.num_local_verts_ * sizeof(int32_t) * 50; // TODO: accuracy
+		a2a_buf_unit = graph_.num_local_verts_ * sizeof(int32_t);
+		size_t s = a2a_buf_unit * A2A_BUF_SIZE; // TODO: accuracy
 		a2a_comm_buf_.allocate_memory(s);
 		if(mpi.isMaster()) print_with_prefix("Allocating shared buffer: %f GB per node.", to_giga(s*2));
 
@@ -313,6 +316,11 @@ public:
 				fprintf(IMD_OUT, "num_buffers_ <= idx (num_buffers=%d)\n", num_buffers_);
 				throw "Error: buffer size not enough";
 			}
+			else{
+			  if(max_num_buffers < idx)
+			    max_num_buffers = idx;
+			}
+
 			return (uint8_t*)first_buffer_ + PRM::COMM_BUFFER_SIZE * idx;
 		}
 
