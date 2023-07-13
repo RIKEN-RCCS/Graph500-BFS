@@ -287,7 +287,7 @@ private:
 	CommBufferPool pool_;
 };
 #undef debug
-#endif // #if 0
+#endif  // #if 0
 
 #if 0
 #define debug(...) debug_print(MPIBU, __VA_ARGS__)

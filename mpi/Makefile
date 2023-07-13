@@ -101,3 +101,7 @@ gnu_func.o: gnu_func.cc
 .PHONY: clean
 clean:
 	-rm -f $(BINS) $(OBJS) $(CUOBJ)
+
+.PHONY: format
+format:
+	clang-format -i $(shell find .. -type f \( -iname "*.c" -o -iname "*.cc" -o -iname "*.cpp" -o -iname "*.h" -o -iname "*.hpp" \))
