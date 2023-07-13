@@ -63,11 +63,10 @@ class EdgeListStorage {
                         edge_memory_size_ * sizeof(EdgeType), mpi.size_2d);
     }
 #endif
-    edge_memory_ = static_cast<EdgeType*>(
-        cache_aligned_xmalloc(edge_memory_size_ * sizeof(EdgeType)));
-
     if (filepath == NULL) {
       data_in_file_ = false;
+      edge_memory_ = static_cast<EdgeType*>(
+          cache_aligned_xmalloc(edge_memory_size_ * sizeof(EdgeType)));
     } else {
       data_in_file_ = true;
       sprintf(filepath_, "%s-%03d", filepath, mpi.rank_2d);
