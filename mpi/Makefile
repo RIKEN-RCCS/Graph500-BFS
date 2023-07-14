@@ -84,13 +84,14 @@ gnu_func.o: gnu_func.cc
 	cp ../../$*.o_ $*.o
 #	g++ -c -g -O3 -Wall $< -o $*.o
 
+# Always rebuild because header files may be changed
+.PHONY: force
+$(OBJS) $(CUOBJ): force
+
 .SUFFIXES: .o .c .cpp .cc .cu
 
 .c.o:
 	$(MPICC) $(INC) -c $(CFLAGS) $< -o $*.o
-
-.cpp.o:
-	$(MPICPP) $(INC) -c $(CPPFLAGS) $< -o $*.o
 
 .cc.o:
 	$(MPICPP) $(INC) -c $(CPPFLAGS) $< -o $*.o
