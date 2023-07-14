@@ -93,9 +93,6 @@ $(OBJS) $(CUOBJ): force
 .c.o:
 	$(MPICC) $(INC) -c $(CFLAGS) $< -o $*.o
 
-.cpp.o:
-	$(MPICPP) $(INC) -c $(CPPFLAGS) $< -o $*.o
-
 .cc.o:
 	$(MPICPP) $(INC) -c $(CPPFLAGS) $< -o $*.o
 
