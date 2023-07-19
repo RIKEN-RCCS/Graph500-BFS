@@ -28,6 +28,13 @@
 
 #include "../mpi/primitives.hpp"
 
+#define EDGE_LIST_STORAGE_THREAD_IO 1
+#if EDGE_LIST_STORAGE_THREAD_IO
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#endif
+
 //-------------------------------------------------------------//
 // Edge List
 //-------------------------------------------------------------//
@@ -49,9 +56,16 @@ class EdgeListStorage {
 
         ,
         read_enabled_(false),
-        read_buffer_(NULL)
+        read_buffer_(NULL),
+#if EDGE_LIST_STORAGE_THREAD_IO
+        read_thread_(),
+        read_mutex_(),
+        read_requested_(false),
+        read_completed_(false),
+        read_start_cond_(),
+        read_done_cond_(),
+#endif
 
-        ,
         write_enabled_(false),
         write_buffer_(NULL),
         write_buffer_filled_size_(0),
@@ -79,6 +93,9 @@ class EdgeListStorage {
       MPI_File_set_view(edge_file_, 0, MpiTypeOf<EdgeType>::type,
                         MpiTypeOf<EdgeType>::type, const_cast<char*>("native"),
                         MPI_INFO_NULL);
+#if EDGE_LIST_STORAGE_THREAD_IO
+      read_thread_ = std::thread([&] { this->readThread(); });
+#endif
     }
   }
 
@@ -89,6 +106,9 @@ class EdgeListStorage {
     }
     if (data_in_file_ == false) {
     } else {
+#if EDGE_LIST_STORAGE_THREAD_IO
+      freeReadThread();
+#endif
       MPI_File_close(&edge_file_);
       edge_file_ = NULL;
       if (read_buffer_ != NULL) {
@@ -118,8 +138,12 @@ class EdgeListStorage {
         if (edge_filled_size_ > 0) {
           int read_count = static_cast<int>(
               std::min<int64_t>(edge_filled_size_, CHUNK_SIZE));
+#if EDGE_LIST_STORAGE_THREAD_IO
+          enqueueRead(0, buffer_to_read, read_count);
+#else
           MPI_File_iread_at(edge_file_, 0, buffer_to_read, read_count,
                             MpiTypeOf<EdgeType>::type, &read_request_);
+#endif
         }
       }
     }
@@ -142,8 +166,12 @@ class EdgeListStorage {
         ++read_block_index_;
         read_offset += CHUNK_SIZE;
       } else {
+#if EDGE_LIST_STORAGE_THREAD_IO
+        waitReadDone();
+#else
         MPI_Status read_result;
         MPI_Wait(&read_request_, &read_result);
+#endif
         ++read_block_index_;
         read_offset += CHUNK_SIZE;
         EdgeType *buffer_to_read, *buffer_for_user;
@@ -152,8 +180,12 @@ class EdgeListStorage {
         if (edge_filled_size_ > read_offset) {
           int read_count = static_cast<int>(
               std::min<int64_t>(edge_filled_size_ - read_offset, CHUNK_SIZE));
+#if EDGE_LIST_STORAGE_THREAD_IO
+          enqueueRead(read_offset, buffer_to_read, read_count);
+#else
           MPI_File_iread_at(edge_file_, read_offset, buffer_to_read, read_count,
                             MpiTypeOf<EdgeType>::type, &read_request_);
+#endif
         }
       }
       return filled_count;
@@ -165,8 +197,12 @@ class EdgeListStorage {
 
     if (edge_memory_ == NULL) {
       if (edge_filled_size_ > read_block_index_ * CHUNK_SIZE) {
+#if EDGE_LIST_STORAGE_THREAD_IO
+        waitReadDone();
+#else
         // break reading loop
         MPI_Wait(&read_request_, MPI_STATUS_IGNORE);
+#endif
       }
       if (read_buffer_ != NULL) {
         free(read_buffer_);
@@ -301,6 +337,63 @@ class EdgeListStorage {
     }
   }
 
+#if EDGE_LIST_STORAGE_THREAD_IO
+  void enqueueRead(MPI_Offset offset, void* buf, int count) {
+    {
+      std::unique_lock<std::mutex> lk(read_mutex_);
+      read_request_offset_ = offset;
+      read_request_buf_ = buf;
+      read_request_count_ = count;
+      read_requested_ = true;
+    }
+    read_start_cond_.notify_one();
+  }
+
+  void waitReadDone() {
+    {
+      std::unique_lock<std::mutex> lk(read_mutex_);
+      if (!read_completed_)
+        read_done_cond_.wait(lk, [&] { return read_completed_; });
+      read_completed_ = false;
+    }
+  }
+
+  void readThread() {
+    MPI_Status read_result;
+    while (1) {
+      {
+        std::unique_lock<std::mutex> lk(read_mutex_);
+        if (!read_requested_)
+          read_start_cond_.wait(lk, [&] { return read_requested_; });
+        read_requested_ = false;
+      }
+      if (!read_request_buf_) {
+        break;
+      }
+
+      MPI_File_read_at(edge_file_, read_request_offset_, read_request_buf_,
+                       read_request_count_, MpiTypeOf<EdgeType>::type,
+                       &read_result);
+
+      {
+        std::unique_lock<std::mutex> lk(read_mutex_);
+        read_completed_ = true;
+      }
+      read_done_cond_.notify_one();
+    }
+  }
+
+  void freeReadThread() {
+    {
+      std::unique_lock<std::mutex> lk(read_mutex_);
+      read_request_buf_ = NULL;
+      read_requested_ = true;
+    }
+    read_start_cond_.notify_one();
+    read_thread_.join();
+  }
+#endif
+
   bool data_in_file_;
   EdgeType* edge_memory_;
   MPI_File edge_file_;
@@ -313,8 +406,20 @@ class EdgeListStorage {
   bool read_enabled_;
   // The offset from which we read next or we are reading now.
   MPI_Offset read_block_index_;
-  MPI_Request read_request_;
   EdgeType* read_buffer_;
+#if EDGE_LIST_STORAGE_THREAD_IO
+  std::thread read_thread_;
+  std::mutex read_mutex_;
+  bool read_requested_;
+  bool read_completed_;
+  std::condition_variable read_start_cond_;
+  std::condition_variable read_done_cond_;
+  MPI_Offset read_request_offset_;
+  void* read_request_buf_;
+  int read_request_count_;
+#else
+  MPI_Request read_request_;
+#endif
 
   // write
   bool write_enabled_;
