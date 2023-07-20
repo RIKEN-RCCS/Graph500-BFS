@@ -357,10 +357,10 @@ class BfsBase {
 
     void* second_buffer() { return second_buffer_; }
 
-    int pool_buffer_size() { return pool_buffer_size_; }
+    size_t pool_buffer_size() { return pool_buffer_size_; }
 
    protected:
-    int pool_buffer_size_;
+    size_t pool_buffer_size_;
     void* first_buffer_;
     void* second_buffer_;
     int current_index_;
@@ -382,7 +382,7 @@ class BfsBase {
     }
     virtual void* clear_buffers() { return this->pool_->clear_buffers(); }
     virtual void* second_buffer() { return this->pool_->second_buffer(); }
-    virtual int max_size() { return this->pool_->pool_buffer_size(); }
+    virtual size_t max_size() { return this->pool_->pool_buffer_size(); }
     virtual int buffer_length() { return BUF_SIZE; }
     virtual MPI_Datatype data_type() { return MpiTypeOf<T>::type; }
     virtual int element_size() { return sizeof(T); }

@@ -23,7 +23,7 @@ class AlltoallBufferHandler {
   virtual void add(void* buffer, void* data, int offset, int length) = 0;
   virtual void* clear_buffers() = 0;
   virtual void* second_buffer() = 0;
-  virtual int max_size() = 0;
+  virtual size_t max_size() = 0;
   virtual int buffer_length() = 0;
   virtual MPI_Datatype data_type() = 0;
   virtual int element_size() = 0;
@@ -138,7 +138,7 @@ class AsyncAlltoallManager {
   void run_with_ptr() {
     PROF(profiling::TimeKeeper tk_all);
     int es = buffer_provider_->element_size();
-    int max_size = buffer_provider_->max_size() / (es * comm_size_);
+    size_t max_size = buffer_provider_->max_size() / (es * comm_size_);
     VERVOSE(last_send_size_ = 0);
     VERVOSE(last_recv_size_ = 0);
 
@@ -237,7 +237,7 @@ class AsyncAlltoallManager {
       void* sendbuf = buffer_provider_->second_buffer();
       void* recvbuf = buffer_provider_->clear_buffers();
       MPI_Datatype type = buffer_provider_->data_type();
-      int recvbufsize = buffer_provider_->max_size();
+      size_t recvbufsize = buffer_provider_->max_size();
       PROF(merge_time_ += tk_all);
       USER_START(a2a_comm);
       VERVOSE(if (loop > 0 && mpi.isMaster())
@@ -321,7 +321,7 @@ class AsyncAlltoallManager {
     void* sendbuf = buffer_provider_->second_buffer();
     void* recvbuf = buffer_provider_->clear_buffers();
     MPI_Datatype type = buffer_provider_->data_type();
-    int recvbufsize = buffer_provider_->max_size();
+    size_t recvbufsize = buffer_provider_->max_size();
     PROF(merge_time_ += tk_all);
     USER_START(a2a_comm);
 #ifdef PROFILE_REGIONS

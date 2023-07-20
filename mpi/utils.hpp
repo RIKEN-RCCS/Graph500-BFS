@@ -2179,7 +2179,7 @@ class ScatterContext {
   }
 
   void alltoallv(void* sendbuf, void* recvbuf, MPI_Datatype type,
-                 int recvbufsize) {
+                 size_t recvbufsize) {
     recv_offsets_[0] = 0;
     for (int r = 0; r < comm_size_; ++r) {
       recv_offsets_[r + 1] = recv_offsets_[r] + recv_counts_[r];
