@@ -300,6 +300,11 @@ class EdgeListStorage {
     int64_t written_size = write_offset_ + write_buffer_filled_size_;
     MPI_Allreduce(&written_size, &max_edge_size_among_all_procs_, 1,
                   MPI_INT64_T, MPI_MAX, MPI_COMM_WORLD);
+#if EDGE_LIST_STORAGE_THREAD_IO
+    if (data_in_file_) {
+      fsync(edge_fd_);
+    }
+#endif
   }
 
   int64_t num_local_edges() { return num_local_edges_; }
@@ -334,8 +339,8 @@ class EdgeListStorage {
     }
     if (data_in_file_) {
 #if EDGE_LIST_STORAGE_THREAD_IO
-      const off_t off_bytes = write_offset_ * sizeof(MpiTypeOf<EdgeType>::type);
-      const size_t bytes_to_write = count * sizeof(MpiTypeOf<EdgeType>::type);
+      const off_t off_bytes = write_offset_ * sizeof(EdgeType);
+      const size_t bytes_to_write = count * sizeof(EdgeType);
       size_t written_bytes = 0;
       while (written_bytes < bytes_to_write) {
         ssize_t ret =
@@ -401,10 +406,8 @@ class EdgeListStorage {
       }
 
 #if EDGE_LIST_STORAGE_THREAD_IO
-      const off_t off_bytes =
-          read_request_offset_ * sizeof(MpiTypeOf<EdgeType>::type);
-      const size_t bytes_to_read =
-          read_request_count_ * sizeof(MpiTypeOf<EdgeType>::type);
+      const off_t off_bytes = read_request_offset_ * sizeof(EdgeType);
+      const size_t bytes_to_read = read_request_count_ * sizeof(EdgeType);
       size_t read_bytes = 0;
       while (read_bytes < bytes_to_read) {  // nen-no-tame loop
         ssize_t ret = pread(
