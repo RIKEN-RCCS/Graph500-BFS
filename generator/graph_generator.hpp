@@ -30,6 +30,10 @@
 
 #define EDGE_LIST_STORAGE_THREAD_IO 1
 #if EDGE_LIST_STORAGE_THREAD_IO
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -48,7 +52,11 @@ class EdgeListStorage {
   EdgeListStorage(int64_t nLocalEdges, const char* filepath = NULL)
       : data_in_file_(false),
         edge_memory_(NULL),
+#if EDGE_LIST_STORAGE_THREAD_IO
+        edge_fd_(-1),
+#else
         edge_file_(NULL),
+#endif
         num_local_edges_(nLocalEdges),
         edge_memory_size_(0),
         edge_filled_size_(0),
@@ -84,6 +92,13 @@ class EdgeListStorage {
     } else {
       data_in_file_ = true;
       sprintf(filepath_, "%s-%03d", filepath, mpi.rank_2d);
+#if EDGE_LIST_STORAGE_THREAD_IO
+      edge_fd_ = open(filepath_, O_CREAT | O_RDWR | O_TRUNC, S_IRUSR | S_IWUSR);
+      if (edge_fd_ < 0)
+        throw std::runtime_error("failed: open EdgeListStorage file");
+      unlink(filepath_);
+      read_thread_ = std::thread([&] { this->readThread(); });
+#else
       MPI_File_open(MPI_COMM_SELF, const_cast<char*>(filepath_),
                     MPI_MODE_RDWR | MPI_MODE_CREATE |
                         //	MPI_MODE_EXCL |
@@ -93,8 +108,6 @@ class EdgeListStorage {
       MPI_File_set_view(edge_file_, 0, MpiTypeOf<EdgeType>::type,
                         MpiTypeOf<EdgeType>::type, const_cast<char*>("native"),
                         MPI_INFO_NULL);
-#if EDGE_LIST_STORAGE_THREAD_IO
-      read_thread_ = std::thread([&] { this->readThread(); });
 #endif
     }
   }
@@ -108,9 +121,11 @@ class EdgeListStorage {
     } else {
 #if EDGE_LIST_STORAGE_THREAD_IO
       freeReadThread();
-#endif
+      close(edge_fd_);
+#else
       MPI_File_close(&edge_file_);
       edge_file_ = NULL;
+#endif
       if (read_buffer_ != NULL) {
         free(read_buffer_);
         read_buffer_ = NULL;
@@ -318,9 +333,24 @@ class EdgeListStorage {
       memcpy(edge_memory_ + write_offset_, edge_data, count * sizeof(EdgeType));
     }
     if (data_in_file_) {
+#if EDGE_LIST_STORAGE_THREAD_IO
+      const off_t off_bytes = write_offset_ * sizeof(MpiTypeOf<EdgeType>::type);
+      const size_t bytes_to_write = count * sizeof(MpiTypeOf<EdgeType>::type);
+      size_t written_bytes = 0;
+      while (written_bytes < bytes_to_write) {
+        ssize_t ret =
+            pwrite(edge_fd_,
+                   static_cast<uint8_t*>(static_cast<void*>(edge_data)) +
+                       written_bytes,
+                   bytes_to_write - written_bytes, off_bytes + written_bytes);
+        if (ret <= 0) throw std::runtime_error("failed: pwrite");
+        written_bytes += ret;
+      }
+#else
       MPI_Status write_result;
       MPI_File_write_at(edge_file_, write_offset_, edge_data, count,
                         MpiTypeOf<EdgeType>::type, &write_result);
+#endif
     }
     write_offset_ += count;
   }
@@ -359,7 +389,6 @@ class EdgeListStorage {
   }
 
   void readThread() {
-    MPI_Status read_result;
     while (1) {
       {
         std::unique_lock<std::mutex> lk(read_mutex_);
@@ -371,10 +400,25 @@ class EdgeListStorage {
         break;
       }
 
+#if EDGE_LIST_STORAGE_THREAD_IO
+      const off_t off_bytes =
+          read_request_offset_ * sizeof(MpiTypeOf<EdgeType>::type);
+      const size_t bytes_to_read =
+          read_request_count_ * sizeof(MpiTypeOf<EdgeType>::type);
+      size_t read_bytes = 0;
+      while (read_bytes < bytes_to_read) {  // nen-no-tame loop
+        ssize_t ret = pread(
+            edge_fd_, static_cast<uint8_t*>(read_request_buf_) + read_bytes,
+            bytes_to_read - read_bytes, off_bytes + read_bytes);
+        if (ret <= 0) throw std::runtime_error("failed: pread");
+        read_bytes += ret;
+      }
+#else
+      MPI_Status read_result;
       MPI_File_read_at(edge_file_, read_request_offset_, read_request_buf_,
                        read_request_count_, MpiTypeOf<EdgeType>::type,
                        &read_result);
-
+#endif
       {
         std::unique_lock<std::mutex> lk(read_mutex_);
         read_completed_ = true;
@@ -396,7 +440,11 @@ class EdgeListStorage {
 
   bool data_in_file_;
   EdgeType* edge_memory_;
+#if EDGE_LIST_STORAGE_THREAD_IO
+  int edge_fd_;
+#else
   MPI_File edge_file_;
+#endif
   int64_t num_local_edges_;
   int64_t edge_memory_size_;
   int64_t edge_filled_size_;
