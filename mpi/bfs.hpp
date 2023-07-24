@@ -323,8 +323,8 @@ class BfsBase {
   class CommBufferPool {
    public:
     void allocate_memory(size_t size) {
-      first_buffer_ = cache_aligned_xmalloc(size);
-      second_buffer_ = cache_aligned_xmalloc(size);
+      first_buffer_ = page_aligned_xmalloc(size);
+      second_buffer_ = page_aligned_xmalloc(size);
       current_index_ = 0;
       pool_buffer_size_ = size;
       num_buffers_ = size / PRM::COMM_BUFFER_SIZE;

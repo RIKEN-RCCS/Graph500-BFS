@@ -8,6 +8,8 @@
 #ifndef GRAPH_CONSTRUCTOR_HPP_
 #define GRAPH_CONSTRUCTOR_HPP_
 
+#include <sys/mman.h>
+
 #include "parameters.h"
 #include "limits.h"
 
@@ -1292,10 +1294,18 @@ class GraphConstructor2DCSR {
         xMPI_Alloc_mem(2 * EdgeList::CHUNK_SIZE * sizeof(EdgeType)));
 
     // const int64_t num_local_verts = g.num_local_verts_;
-    g.edge_array_ = (int64_t*)cache_aligned_xcalloc(
-        wide_row_starts_[num_wide_rows_] * sizeof(int64_t));
-    src_vertexes_ = (uint16_t*)cache_aligned_xcalloc(
-        wide_row_starts_[num_wide_rows_] * sizeof(uint16_t));
+    auto page_size = sysconf(_SC_PAGESIZE);
+    auto edge_array_bytes =
+        (wide_row_starts_[num_wide_rows_] * sizeof(int64_t) + page_size - 1) /
+        page_size * page_size;
+    auto src_vert_bytes =
+        (wide_row_starts_[num_wide_rows_] * sizeof(uint16_t) + page_size - 1) /
+        page_size * page_size;
+    g.edge_array_ = (int64_t*)page_aligned_xmalloc(edge_array_bytes);
+    src_vertexes_ = (uint16_t*)page_aligned_xmalloc(src_vert_bytes);
+    // zero clear (need...?)
+    madvise(g.edge_array_, edge_array_bytes, MADV_DONTNEED);
+    madvise(src_vertexes_, src_vert_bytes, MADV_DONTNEED);
 
     int num_loops = edge_list->beginRead(true);
 
