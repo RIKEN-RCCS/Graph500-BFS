@@ -124,6 +124,7 @@ class BfsBase {
 
   void prepare_bfs(int validation_level, bool pre_exec, bool real_benchmark) {
     printInformation(validation_level, pre_exec, real_benchmark);
+    malloc_trim(0);
     allocate_memory();
   }
 
