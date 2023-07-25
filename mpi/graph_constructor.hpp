@@ -9,6 +9,7 @@
 #define GRAPH_CONSTRUCTOR_HPP_
 
 #include <sys/mman.h>
+#include <malloc.h>
 
 #include "parameters.h"
 #include "limits.h"
@@ -308,8 +309,10 @@ struct DegreeCalculation {
 
   GraphConstructionData process() {
     int64_t num_verts = num_orig_local_verts();
-    int64_t* degree = static_cast<int64_t*>(
-        cache_aligned_xcalloc(num_verts * sizeof(int64_t)));
+    auto page_size = sysconf(_SC_PAGESIZE);
+    size_t degree_bytes = (num_verts * sizeof(int64_t) + page_size - 1) / page_size * page_size;
+    int64_t* degree = static_cast<int64_t*>(page_aligned_xmalloc(degree_bytes));
+    madvise(degree, degree_bytes, MADV_DONTNEED);
     LocalVertex* reorder_map = calc_degree(degree);
     make_construct_data(reorder_map);
     return gather_data(reorder_map, degree);
@@ -424,6 +427,7 @@ struct DegreeCalculation {
     // free memory
     delete[] dwide_row_data_;
     dwide_row_data_ = NULL;
+    malloc_trim(0);
 
     // allocate 2
     wide_row_length_ = static_cast<int64_t*>(
@@ -700,6 +704,7 @@ class GraphConstructor2DCSR {
 
     delete degree_calc_;
     degree_calc_ = NULL;
+    malloc_trim(0);
   }
 
   // function #1
@@ -1369,6 +1374,7 @@ class GraphConstructor2DCSR {
 
       if (mpi.isMaster())
         print_with_prefix("Iteration %d finished.", loop_count);
+      malloc_trim(0);
     }
 
     edge_list->endRead();
