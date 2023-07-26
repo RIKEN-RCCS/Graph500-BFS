@@ -8,6 +8,7 @@
 #ifndef GRAPH_CONSTRUCTOR_HPP_
 #define GRAPH_CONSTRUCTOR_HPP_
 
+#include <cstring>
 #include <sys/mman.h>
 #include <malloc.h>
 
@@ -217,9 +218,13 @@ struct DegreeCalculation {
   int64_t max_local_verts_;
 
   int num_rows_;
+  int num_iters_;
   int64_t* row_length_;
   int64_t* row_offset_;
-  std::vector<DWideRowEdge>* dwide_row_data_;
+  int64_t* row_length_prev_;
+  int64_t* row_offset_prev_;
+  size_t* dwide_row_offsets_;
+  DWideRowEdge* dwide_row_data_;
   LocalVertex* vertexes_;  // passed to ConstructionData
 
   DegreeCalculation(int orig_local_bits, int log_local_verts_unit) {
@@ -230,17 +235,26 @@ struct DegreeCalculation {
       fprintf(IMD_OUT, "BLOCK_SIZE is too large");
       throw "Error";
     }
-    dwide_row_data_ = new std::vector<DWideRowEdge>[num_rows_]();
     row_length_ = static_cast<int64_t*>(
         cache_aligned_xcalloc(num_rows_ * sizeof(int64_t)));
     row_offset_ = static_cast<int64_t*>(
         cache_aligned_xcalloc(num_rows_ * sizeof(int64_t)));
+    row_length_prev_ = static_cast<int64_t*>(
+        cache_aligned_xcalloc(num_rows_ * sizeof(int64_t)));
+    row_offset_prev_ = static_cast<int64_t*>(
+        cache_aligned_xcalloc(num_rows_ * sizeof(int64_t)));
+    dwide_row_data_ = NULL;
+    dwide_row_offsets_ = NULL;
   }
 
   ~DegreeCalculation() {
     if (dwide_row_data_ != NULL) {
-      delete[] dwide_row_data_;
+      free(dwide_row_data_);
       dwide_row_data_ = NULL;
+    }
+    if (dwide_row_offsets_ != NULL) {
+      free(dwide_row_offsets_);
+      dwide_row_offsets_ = NULL;
     }
     if (wide_row_length_ != NULL) {
       free(wide_row_length_);
@@ -266,6 +280,14 @@ struct DegreeCalculation {
       free(row_offset_);
       row_offset_ = NULL;
     }
+    if (row_length_prev_ != NULL) {
+      free(row_length_prev_);
+      row_length_prev_ = NULL;
+    }
+    if (row_offset_prev_ != NULL) {
+      free(row_offset_prev_);
+      row_offset_prev_ = NULL;
+    }
   }
 
   int64_t num_orig_local_verts() const { return int64_t(1) << org_local_bits_; }
@@ -276,8 +298,14 @@ struct DegreeCalculation {
 
   int64_t local_bitmap_size() const { return max_local_verts_ / NBPE; }
 
+  void init(int num_iters) {
+    num_iters_ = num_iters;
+    dwide_row_offsets_ = static_cast<size_t*>(page_aligned_xcalloc(
+        (static_cast<size_t>(num_rows_) * num_iters + 1) * sizeof(size_t)));
+  }
+
   // edges: high: v1's c, low: v0's vertex_local
-  void add(int64_t* edges, int64_t num_edges) {
+  void add(int iter_idx, int64_t* edges, int64_t num_edges) {
     // count edges
 #pragma omp parallel for
     for (int64_t i = 0; i < num_edges; ++i) {
@@ -288,9 +316,20 @@ struct DegreeCalculation {
       __sync_fetch_and_add(&row_length_[row], 1);
     }
 
+    size_t* cur_offset = dwide_row_offsets_ + (iter_idx * num_rows_);
+    for (int i = 1; i <= num_rows_; ++i) {
+      cur_offset[i] =
+          cur_offset[i - 1] + (row_length_[i - 1] - row_length_prev_[i - 1]);
+    }
+    std::memcpy(row_length_prev_, row_length_, num_rows_ * sizeof(int64_t));
+
     // resize data store
-    for (int i = 0; i < num_rows_; ++i) {
-      dwide_row_data_[i].resize(row_length_[i], DWideRowEdge(0, 0));
+    if (dwide_row_data_) {
+      dwide_row_data_ = static_cast<DWideRowEdge*>(std::realloc(
+          dwide_row_data_, cur_offset[num_rows_] * sizeof(DWideRowEdge)));
+    } else {
+      dwide_row_data_ = static_cast<DWideRowEdge*>(
+          page_aligned_xmalloc(cur_offset[num_rows_] * sizeof(DWideRowEdge)));
     }
 
     // store data
@@ -302,15 +341,18 @@ struct DegreeCalculation {
       int row = local >> LOG_BLOCK_SIZE;
       int src_vertex = local % BLOCK_SIZE;
 
-      int64_t offset = __sync_fetch_and_add(&row_offset_[row], 1);
-      dwide_row_data_[row][offset] = DWideRowEdge(src_vertex, c);
+      int64_t offset =
+          __sync_fetch_and_add(&row_offset_[row], 1) - row_offset_prev_[row];
+      dwide_row_data_[cur_offset[row] + offset] = DWideRowEdge(src_vertex, c);
     }
+    std::memcpy(row_offset_prev_, row_offset_, num_rows_ * sizeof(int64_t));
   }
 
   GraphConstructionData process() {
     int64_t num_verts = num_orig_local_verts();
     auto page_size = sysconf(_SC_PAGESIZE);
-    size_t degree_bytes = (num_verts * sizeof(int64_t) + page_size - 1) / page_size * page_size;
+    size_t degree_bytes =
+        (num_verts * sizeof(int64_t) + page_size - 1) / page_size * page_size;
     int64_t* degree = static_cast<int64_t*>(page_aligned_xmalloc(degree_bytes));
     madvise(degree, degree_bytes, MADV_DONTNEED);
     LocalVertex* reorder_map = calc_degree(degree);
@@ -337,11 +379,15 @@ struct DegreeCalculation {
 
 #pragma omp parallel for
     for (int r = 0; r < num_rows_; ++r) {
-      std::vector<DWideRowEdge>& row_data = dwide_row_data_[r];
-      for (int64_t c = 0; c < int64_t(row_data.size()); ++c) {
-        DWideRowEdge& edge = row_data[c];
-        TwodVertex local = r * BLOCK_SIZE + edge.src_vertex;
-        __sync_fetch_and_add(&degree[local], 1);
+      for (int i = 0; i < num_iters_; ++i) {
+        size_t j = static_cast<size_t>(i) * num_rows_ + r;
+        DWideRowEdge* row_data_start = dwide_row_data_ + dwide_row_offsets_[j];
+        DWideRowEdge* row_data_end =
+            dwide_row_data_ + dwide_row_offsets_[j + 1];
+        for (DWideRowEdge* d = row_data_start; d < row_data_end; ++d) {
+          TwodVertex local = r * BLOCK_SIZE + d->src_vertex;
+          __sync_fetch_and_add(&degree[local], 1);
+        }
       }
     }
 
@@ -401,12 +447,15 @@ struct DegreeCalculation {
 
 #pragma omp for
       for (int r = 0; r < num_rows_; ++r) {
-        std::vector<DWideRowEdge>& row_data = dwide_row_data_[r];
-        for (int64_t c = 0; c < int64_t(row_data.size()); ++c) {
-          DWideRowEdge& edge = row_data[c];
-          {
-            int c = edge.c;
-            TwodVertex local = r * BLOCK_SIZE + edge.src_vertex;
+        for (int i = 0; i < num_iters_; ++i) {
+          size_t j = static_cast<size_t>(i) * num_rows_ + r;
+          DWideRowEdge* row_data_start =
+              dwide_row_data_ + dwide_row_offsets_[j];
+          DWideRowEdge* row_data_end =
+              dwide_row_data_ + dwide_row_offsets_[j + 1];
+          for (DWideRowEdge* d = row_data_start; d < row_data_end; ++d) {
+            int c = d->c;
+            TwodVertex local = r * BLOCK_SIZE + d->src_vertex;
             LocalVertex reordered = reorder_map[local];
 
             int64_t wide_row_offset =
@@ -425,8 +474,18 @@ struct DegreeCalculation {
     }
 
     // free memory
-    delete[] dwide_row_data_;
+    free(dwide_row_data_);
+    free(dwide_row_offsets_);
+    free(row_length_);
+    free(row_offset_);
+    free(row_length_prev_);
+    free(row_offset_prev_);
     dwide_row_data_ = NULL;
+    dwide_row_offsets_ = NULL;
+    row_length_ = NULL;
+    row_offset_ = NULL;
+    row_length_prev_ = NULL;
+    row_offset_prev_ = NULL;
     malloc_trim(0);
 
     // allocate 2
@@ -822,6 +881,7 @@ class GraphConstructor2DCSR {
     int64_t* edges_to_send = static_cast<int64_t*>(
         xMPI_Alloc_mem(2 * EdgeList::CHUNK_SIZE * sizeof(int64_t)));
     int num_loops = edge_list->beginRead(false);
+    degree_calc_->init(num_loops);
 
     if (mpi.isMaster())
       print_with_prefix("Begin counting degree. Number of iterations is %d.",
@@ -888,7 +948,7 @@ class GraphConstructor2DCSR {
 #endif
 
       const int64_t num_recv_edges = scatter.get_recv_count();
-      degree_calc_->add(recv_edges, num_recv_edges);
+      degree_calc_->add(loop_count, recv_edges, num_recv_edges);
 
       scatter.free(recv_edges);
 
