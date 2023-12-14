@@ -1,5 +1,5 @@
 #!/bin/bash
-#PJM -L "node=8x48x32:strict"
+#PJM -L "node=16x24x32:strict"
 #PJM -L "rscgrp=large"
 #PJM -L "elapse=0:30:00"
 #PJM -L "freq=2200,eco_state=2"
