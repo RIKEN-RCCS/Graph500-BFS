@@ -471,7 +471,11 @@ int read_log_file(LogFileFormat* log, int SCALE, int edgefactor,
     if (mpi.isMaster()) {
       FILE* fp = fopen(logfilename, "rb");
       if (fp != NULL) {
-        fread(log, sizeof(log[0]), 1, fp);
+        // GCC generates a warning if the return value is unused
+        if (fread(log, sizeof(log[0]), 1, fp) != 1) {
+          print_with_prefix("Failed to read a log file");
+          MPI_Abort(MPI_COMM_WORLD, 1);
+        }
         if (log->scale != SCALE || log->edge_factor != edgefactor ||
             log->mpi_size != mpi.size_2d) {
           print_with_prefix(

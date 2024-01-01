@@ -10,6 +10,8 @@
 
 #include <stdint.h>
 #include <assert.h>
+#include <limits>
+#include <type_traits>
 
 // for sorting
 #include <algorithm>
@@ -220,6 +222,36 @@ void sort2(IterKey* begin_key, IterValue* begin_value, size_t count,
   pointer_pair_iterator<IterKey, IterValue> begin(begin_key, begin_value),
       end(begin_key + count, begin_value + count);
   std::sort(begin, end, comp);
+}
+
+//-------------------------------------------------------------//
+// Type conversion
+//-------------------------------------------------------------//
+
+//
+// Converts an integer to a signed integer.
+//
+// Note that GCC generates warnings for comparison between values of different
+// signedness with `-Wsign-compare`, which is enabled by `-Wall`.
+//
+template <typename Unsigned>
+static constexpr auto to_sig(const Unsigned x) -> std::make_signed_t<Unsigned> {
+  using signed_type = std::remove_cv_t<std::make_signed_t<Unsigned>>;
+  assert(x <= std::numeric_limits<signed_type>::max());
+  return static_cast<signed_type>(x);
+}
+
+//
+// Converts an integer to an unsigned integer.
+//
+// Note that GCC generates warnings for comparison between values of different
+// signedness with `-Wsign-compare`, which is enabled by `-Wall`.
+//
+template <typename Signed>
+static constexpr auto to_unsig(const Signed x) -> std::make_unsigned_t<Signed> {
+  using unsigned_type = std::remove_cv_t<std::make_unsigned_t<Signed>>;
+  assert(x >= 0);
+  return static_cast<unsigned_type>(x);
 }
 
 //-------------------------------------------------------------//

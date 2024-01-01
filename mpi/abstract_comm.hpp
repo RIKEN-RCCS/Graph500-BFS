@@ -162,13 +162,13 @@ class AsyncAlltoallManager {
             if (length == 0) continue;
 
             int size = length + 3;
-            if (counts[i] + size >= max_size) {
+            if (counts[i] + size >= to_sig(max_size)) {
               counts[i] = max_size;
               break;
             }
 
             counts[i] += size;
-            if (counts[i] + MINIMUM_POINTER_SPACE >= max_size) {
+            if (counts[i] + MINIMUM_POINTER_SPACE >= to_sig(max_size)) {
               // too small space
               break;
             }
@@ -208,7 +208,7 @@ class AsyncAlltoallManager {
             if (length == 0) continue;
 
             int size = length + 3;
-            if (count + size >= max_size) {
+            if (count + size >= to_sig(max_size)) {
               length = max_size - count - 3;
               count = max_size;
             } else {
@@ -227,7 +227,7 @@ class AsyncAlltoallManager {
             buffer.length -= length;
             buffer.ptr = (int64_t*)buffer.ptr + length;
 
-            if (count + MINIMUM_POINTER_SPACE >= max_size) break;
+            if (count + MINIMUM_POINTER_SPACE >= to_sig(max_size)) break;
           }
           node.send_data.clear();
         }  // #pragma omp for schedule(static)
