@@ -308,6 +308,7 @@ class EdgeListStorage {
   }
 
   int64_t num_local_edges() { return num_local_edges_; }
+  int64_t edge_filled_size() { return edge_filled_size_; }
   bool data_is_in_file() { return data_in_file_; }
   const char* get_filepath() { return filepath_; }
 

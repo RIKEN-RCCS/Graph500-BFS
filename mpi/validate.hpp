@@ -588,9 +588,10 @@ class BfsValidation {
 
  public:
   BfsValidation(int64_t nglobalverts__, int64_t nlocalverts__,
-                int64_t chunksize)
+                bool corebfs_enabled__, int64_t chunksize)
       : nglobalverts(nglobalverts__),
         nlocalverts(nlocalverts__),
+        corebfs_enabled(corebfs_enabled__),
         chunksize_(chunksize) {
     uint64_t maxlocalverts_ui = nlocalverts;
     MPI_Allreduce(MPI_IN_PLACE, &maxlocalverts_ui, 1, MPI_UINT64_T, MPI_MAX,
@@ -682,11 +683,12 @@ class BfsValidation {
 
     assert(pred);
 
-    if (true) {  // TODO:
-      error_counts += check_bfs_depth_map_using_predecessors(root, pred);
-    } else {
-      /* Create a vertex depth map to use for later validation. */
+    if (corebfs_enabled) {
+      // Create a vertex depth map to use for later validation since CoreBFS
+      // does not provide depths of tree vertices.
       error_counts += build_bfs_depth_map(root, pred);
+    } else {
+      error_counts += check_bfs_depth_map_using_predecessors(root, pred);
     }
     MPI_Allreduce(MPI_IN_PLACE, &error_counts, 1, MPI_INT, MPI_SUM,
                   mpi.comm_2d);     // #3
@@ -1221,6 +1223,7 @@ class BfsValidation {
 
   const int64_t nglobalverts;
   const int64_t nlocalverts;
+  const bool corebfs_enabled;
   int64_t maxlocalverts;
   int64_t chunksize_;
 
@@ -1232,10 +1235,11 @@ class BfsValidation {
  * */
 template <typename EdgeList>
 int validate_bfs_result(EdgeList* edge_list, const int64_t nglobalverts,
-                        const int64_t nlocalverts, const int64_t root,
-                        int64_t* const pred,
+                        const int64_t nlocalverts, const bool corebfs_enabled,
+                        const int64_t root, int64_t* const pred,
                         int64_t* const edge_visit_count_ptr) {
-  BfsValidation validation(nglobalverts, nlocalverts, EdgeList::CHUNK_SIZE);
+  BfsValidation validation(nglobalverts, nlocalverts, corebfs_enabled,
+                           EdgeList::CHUNK_SIZE);
   return validation.validate(edge_list, root, pred, edge_visit_count_ptr);
 }
 

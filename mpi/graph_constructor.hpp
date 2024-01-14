@@ -109,7 +109,7 @@ class Graph2DCSR {
     return e & ((1 << log_max_weight_) - 1);
   }
 
-  bool has_edge(int64_t v, bool has_weight = false) {
+  bool has_edge(int64_t v, bool has_weight = false) const {
     if (vertex_owner(v) == mpi.rank_2d) {
       int64_t v_local = reorder_map_[v / mpi.size_2d];
       if (v_local > num_local_verts_) return false;
