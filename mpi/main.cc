@@ -403,7 +403,7 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
   if (mpi.isMaster() && root_start != 0)
     print_with_prefix("Resume from %d th run", root_start);
 
-  EdgeListStorage<UnweightedPackedEdge, 8 * 1024 * 1024> edge_list(
+  EdgeListStorage<UnweightedPackedEdge> edge_list(
       (int64_t(1) << SCALE) * edgefactor / mpi.size_2d, getenv("TMPFILE"));
 
   BfsOnCPU::printInformation(validation_level, pre_exec, real_benchmark);
