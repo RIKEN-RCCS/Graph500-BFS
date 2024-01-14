@@ -469,11 +469,10 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
                               beta, perf);
   } else {
     if (SCALE > 43) {
-      if (mpi.isMaster())
-        print_with_prefix(
-            "Auto-tuning option cannot be supported SCALE > 43"); // Please
-                                                                  // define
-                                                                  // pf_nedge[44].
+      if (mpi.isMaster()) {
+        // Please define pf_nedge[44].
+        print_with_prefix("Auto-tuning option cannot be supported SCALE > 43");
+      }
       MPI_Finalize();
       exit(1);
     }
