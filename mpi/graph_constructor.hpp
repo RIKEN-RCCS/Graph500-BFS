@@ -9,7 +9,6 @@
 #define GRAPH_CONSTRUCTOR_HPP_
 
 #include <cstring>
-#include <sys/mman.h>
 #include <malloc.h>
 
 #include "parameters.h"
@@ -350,11 +349,8 @@ struct DegreeCalculation {
 
   GraphConstructionData process() {
     int64_t num_verts = num_orig_local_verts();
-    auto page_size = sysconf(_SC_PAGESIZE);
-    size_t degree_bytes =
-        (num_verts * sizeof(int64_t) + page_size - 1) / page_size * page_size;
-    int64_t* degree = static_cast<int64_t*>(page_aligned_xmalloc(degree_bytes));
-    madvise(degree, degree_bytes, MADV_DONTNEED);
+    int64_t* degree = static_cast<int64_t*>(
+        cache_aligned_xcalloc(num_verts * sizeof(int64_t)));
     LocalVertex* reorder_map = calc_degree(degree);
     make_construct_data(reorder_map);
     return gather_data(reorder_map, degree);
@@ -1359,18 +1355,10 @@ class GraphConstructor2DCSR {
         xMPI_Alloc_mem(2 * EdgeList::CHUNK_SIZE * sizeof(EdgeType)));
 
     // const int64_t num_local_verts = g.num_local_verts_;
-    auto page_size = sysconf(_SC_PAGESIZE);
-    auto edge_array_bytes =
-        (wide_row_starts_[num_wide_rows_] * sizeof(int64_t) + page_size - 1) /
-        page_size * page_size;
-    auto src_vert_bytes =
-        (wide_row_starts_[num_wide_rows_] * sizeof(uint16_t) + page_size - 1) /
-        page_size * page_size;
-    g.edge_array_ = (int64_t*)page_aligned_xmalloc(edge_array_bytes);
-    src_vertexes_ = (uint16_t*)page_aligned_xmalloc(src_vert_bytes);
-    // zero clear (need...?)
-    madvise(g.edge_array_, edge_array_bytes, MADV_DONTNEED);
-    madvise(src_vertexes_, src_vert_bytes, MADV_DONTNEED);
+    g.edge_array_ = (int64_t*)cache_aligned_xcalloc(
+        wide_row_starts_[num_wide_rows_] * sizeof(int64_t));
+    src_vertexes_ = (uint16_t*)cache_aligned_xcalloc(
+        wide_row_starts_[num_wide_rows_] * sizeof(uint16_t));
 
     int num_loops = edge_list->beginRead(true);
 
