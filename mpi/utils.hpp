@@ -2190,7 +2190,7 @@ class ScatterContext {
     for (int r = 0; r < comm_size_; ++r) {
       recv_offsets_[r + 1] = recv_offsets_[r] + recv_counts_[r];
     }
-    if (recv_counts_[comm_size_] > recvbufsize) {
+    if (recv_counts_[comm_size_] > to_sig(recvbufsize)) {
       fprintf(IMD_OUT, "Error: recv_counts_[comm_size_] > recvbufsize");
       throw "Error: buffer size not enough";
     }
