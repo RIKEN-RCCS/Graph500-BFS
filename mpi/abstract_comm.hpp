@@ -369,7 +369,7 @@ class AsyncAlltoallManager {
     // lock topology
     // FoldNode::send_mutex -> thread_sync_
     pthread_mutex_t thread_sync_;
-  }* d_;
+  } * d_;
 
   MPI_Comm comm_;
 

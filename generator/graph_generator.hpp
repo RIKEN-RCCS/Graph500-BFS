@@ -43,7 +43,7 @@
 // Edge List
 //-------------------------------------------------------------//
 
-template <typename EdgeType, int CHUNK_SIZE_>
+template <typename EdgeType, int CHUNK_SIZE_ = 8 * 1024 * 1024>
 class EdgeListStorage {
  public:
   static const int CHUNK_SIZE = CHUNK_SIZE_;

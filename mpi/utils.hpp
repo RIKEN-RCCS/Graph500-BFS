@@ -1065,7 +1065,8 @@ bool detect_core_affinity(std::vector<int>& cpu_set) {
 #endif  // #if SGI_OMPLACE_BUG
 
 #pragma omp parallel num_threads(num_omp_threads) \
-    reduction(| : core_affinity, process_affinity)
+    reduction(|                                   \
+              : core_affinity, process_affinity)
   {
     thread_id = omp_get_thread_num();
     cpu_set_t set;
@@ -3730,7 +3731,7 @@ int64_t pf_nedge[] = {
     17592103986723,  // 40
     35184218756936,  // 41
     70368458081736,  // 42
-   140736916163472   // 43 (Fix me because this value is 42 x 2)
+    140736916163472  // 43 (Fix me because this value is 42 x 2)
 };
 #endif /* UTILS_IMPL_HPP_ */
 
