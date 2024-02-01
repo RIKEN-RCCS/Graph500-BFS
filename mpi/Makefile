@@ -34,7 +34,7 @@ MPICPP := mpicxx
 CUDALIB := -L$(CUDA_PATH)/lib64 -lcudart -lcuda
 NVCC := nvcc
 
-INC := # -I$(CUDA_PATH)/include
+INC := -I../external # -I$(CUDA_PATH)/include
 BINS := runnable
 OBJS := main.o ../generator/splittable_mrg.o
 CUOBJ := cuda_kernel.o

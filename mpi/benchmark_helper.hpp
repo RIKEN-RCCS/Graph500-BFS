@@ -406,13 +406,14 @@ void decode_edge(GraphType& g, int64_t e0, int64_t e1, int64_t& v0, int64_t& v1,
   v1 = (v1_high << log_size_r) | rank_r;
 }
 
-template <typename GraphType>
-void find_roots(GraphType& g, int64_t* bfs_roots, int& num_bfs_roots, int r1,
-                int r2) {
+template <typename Bfs>
+void find_roots(const Bfs& benchmark, int64_t* bfs_roots, int& num_bfs_roots,
+                int r1, int r2) {
   using namespace PRM;
   /* Find roots and max used vertex */
-  int64_t counter = 0;
+  const Graph2DCSR& g = benchmark.graph_;
   const int64_t nglobalverts = int64_t(1) << g.log_orig_global_verts_;
+  int64_t counter = 0;
   int bfs_root_idx;
   for (bfs_root_idx = 0; bfs_root_idx < num_bfs_roots; ++bfs_root_idx) {
     int64_t root;
@@ -431,7 +432,7 @@ void find_roots(GraphType& g, int64_t* bfs_roots, int& num_bfs_roots, int r1,
         }
       }
       if (is_duplicate) continue; /* Everyone takes the same path here */
-      int root_ok = (int)g.has_edge(root);
+      int root_ok = static_cast<int>(benchmark.has_edge(root));
       int send_root_ok = root_ok;
       MPI_Allreduce(&send_root_ok, &root_ok, 1, MPI_INT, MPI_LOR,
                     MPI_COMM_WORLD);

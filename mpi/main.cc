@@ -336,7 +336,7 @@ void find_roots_in_large_graph(int root_start, int num_bfs_roots,
                                int64_t auto_tuning_data[][AUTO_NUM],
                                double alpha, double beta, double *perf) {
   int r = 0;
-  find_roots(benchmark->graph_, bfs_roots, num_bfs_roots, r++, 0);
+  find_roots(*benchmark, bfs_roots, num_bfs_roots, r++, 0);
   measure_performance(root_start, num_bfs_roots, benchmark, bfs_roots, pred,
                       SCALE, edgefactor, auto_tuning_data, alpha, beta, perf);
 
@@ -349,7 +349,7 @@ void find_roots_in_large_graph(int root_start, int num_bfs_roots,
 
       if (flag) break;
       if (mpi.isMaster()) print_with_prefix("Pick roots again");
-      find_roots(benchmark->graph_, bfs_roots, num_bfs_roots, r++, 0);
+      find_roots(*benchmark, bfs_roots, num_bfs_roots, r++, 0);
       measure_performance(root_start, num_bfs_roots, benchmark, bfs_roots, pred,
                           SCALE, edgefactor, auto_tuning_data, alpha, beta,
                           perf);
@@ -388,8 +388,8 @@ void auto_tuning(int root_start, int num_bfs_roots, BfsOnCPU *benchmark,
 }
 
 void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
-                  int validation_level, bool auto_tuning_enabled, bool pre_exec,
-                  bool real_benchmark) {
+                  int validation_level, bool auto_tuning_enabled,
+                  bool corebfs_enabled, bool pre_exec, bool real_benchmark) {
   using namespace PRM;
   SET_AFFINITY;
 
@@ -417,7 +417,7 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
   // Create BFS instance and the *COMMUNICATION THREAD*.
   BfsOnCPU *benchmark = new BfsOnCPU();
   double construction_time = MPI_Wtime();
-  benchmark->construct(&edge_list);
+  benchmark->construct(SCALE, edgefactor, corebfs_enabled, &edge_list);
   construction_time = MPI_Wtime() - construction_time;
 
   if (mpi.isMaster()) print_with_prefix("Redistributing edge list...");
@@ -445,7 +445,8 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
     init_log(SCALE, edgefactor, generation_time, construction_time,
              redistribution_time, &log);
 
-  benchmark->prepare_bfs(validation_level, pre_exec, real_benchmark);
+  benchmark->prepare_bfs(validation_level, pre_exec, real_benchmark, edgefactor,
+                         alpha, beta, pred);
 
 #if PERSISTENT_COMM
   // To improve performance, MPI_Request is pre-created for MPI_Send_init() and
@@ -611,14 +612,14 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
     validate_times[i] = MPI_Wtime();
     int64_t edge_visit_count = 0;
     if (validation_level == 2) {
-      result_ok =
-          validate_bfs_result(&edge_list, max_used_vertex + 1, nlocalverts,
-                              bfs_roots[i], pred, &edge_visit_count);
+      result_ok = validate_bfs_result(&edge_list, max_used_vertex + 1,
+                                      nlocalverts, corebfs_enabled,
+                                      bfs_roots[i], pred, &edge_visit_count);
     } else if (validation_level == 1) {
       if (i == 0) {
-        result_ok =
-            validate_bfs_result(&edge_list, max_used_vertex + 1, nlocalverts,
-                                bfs_roots[i], pred, &edge_visit_count);
+        result_ok = validate_bfs_result(&edge_list, max_used_vertex + 1,
+                                        nlocalverts, corebfs_enabled,
+                                        bfs_roots[i], pred, &edge_visit_count);
         pf_nedge[SCALE] = edge_visit_count;
       } else {
         edge_visit_count = pf_nedge[SCALE];
@@ -719,10 +720,10 @@ static void print_help(char *argv) {
 
 static void set_args(const int argc, char **argv, int *edge_factor,
                      double *alpha, double *beta, int *validation_level,
-                     bool *auto_tuning_enabled, bool *pre_exec,
-                     bool *real_benchmark) {
+                     bool *auto_tuning_enabled, bool *corebfs_enabled,
+                     bool *pre_exec, bool *real_benchmark) {
   int result;
-  while ((result = getopt(argc, argv, "e:a:b:v:APR")) != -1) {
+  while ((result = getopt(argc, argv, "e:a:b:v:ACPR")) != -1) {
     switch (result) {
       case 'e':
         *edge_factor = atoi(optarg);
@@ -743,6 +744,9 @@ static void set_args(const int argc, char **argv, int *edge_factor,
         break;
       case 'A':
         *auto_tuning_enabled = true;
+        break;
+      case 'C':
+        *corebfs_enabled = true;
         break;
       case 'P':
         *pre_exec = true;
@@ -766,11 +770,12 @@ int main(int argc, char **argv) {
   double beta = DEFAULT_BETA;
   int validation_level = DEFAULT_VALIDATION_LEVEL;
   bool auto_tuning_enabled = false;
+  bool corebfs_enabled = false;
   bool real_benchmark = false;
   bool pre_exec = false;
 
   set_args(argc, argv, &edge_factor, &alpha, &beta, &validation_level,
-           &auto_tuning_enabled, &pre_exec, &real_benchmark);
+           &auto_tuning_enabled, &corebfs_enabled, &pre_exec, &real_benchmark);
   if (real_benchmark) {
     validation_level = 2;
     pre_exec = true;
@@ -778,7 +783,7 @@ int main(int argc, char **argv) {
 
   setup_globals(argc, argv, scale, edge_factor);
   graph500_bfs(scale, edge_factor, alpha, beta, validation_level,
-               auto_tuning_enabled, pre_exec, real_benchmark);
+               auto_tuning_enabled, corebfs_enabled, pre_exec, real_benchmark);
   cleanup_globals();
 
   return 0;
