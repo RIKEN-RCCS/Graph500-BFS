@@ -28,6 +28,26 @@ int inline edge_owner(int64_t v0, int64_t v1) {
 int inline vertex_owner(int64_t v) { return v % mpi.size_2d; }
 int64_t inline vertex_local(int64_t v) { return v / mpi.size_2d; }
 
+class SubRowMap {
+ public:
+  SubRowMap() : row_bitmap_(NULL), row_sums_(NULL), row_starts_(NULL) {}
+
+  ~SubRowMap() { clean(); }
+
+  void clean() {
+    free(row_bitmap_);
+    row_bitmap_ = NULL;
+    free(row_sums_);
+    row_sums_ = NULL;
+    free(row_starts_);
+    row_starts_ = NULL;
+  }
+
+  BitmapType* row_bitmap_;  // Index: SBI
+  TwodVertex* row_sums_;    // Index: SBI
+  uint32_t* row_starts_;    // Index: CSI
+};
+
 #ifdef SMALL_REORDER_BIT
 uint32_t inline reorder_get_group_id_from_local_id(const int64_t v,
                                                    const int local_bits) {
@@ -83,6 +103,9 @@ class Graph2DCSR {
   Graph2DCSR()
       : row_bitmap_(NULL),
         row_sums_(NULL),
+#if COMPRESS_ROW_STARTS
+        sub_row_map_(),
+#endif  // #if COMPRESS_ROW_STARTS
         has_edge_bitmap_(NULL),
         reorder_map_(NULL),
         degree_(NULL),
@@ -130,8 +153,10 @@ class Graph2DCSR {
     free(edge_array_);
     edge_array_ = NULL;
 #endif
-    free(row_starts_);
-    row_starts_ = NULL;
+    if (row_starts_ != NULL) {
+      free(row_starts_);
+      row_starts_ = NULL;
+    }
 #ifdef SMALL_REORDER_BIT
     free(isolated_edges_.high_ptr);
     free(isolated_edges_.low_ptr);
@@ -247,8 +272,13 @@ class Graph2DCSR {
 
   // num_local_verts_ <= num_orig_local_verts_ <= length(reorder_map_)
 
-  BitmapType* row_bitmap_;       // Index: SBI
-  TwodVertex* row_sums_;         // Index: SBI
+  BitmapType* row_bitmap_;  // Index: SBI
+  TwodVertex* row_sums_;    // Index: SBI
+
+#if COMPRESS_ROW_STARTS
+  SubRowMap sub_row_map_;
+#endif  // #if COMPRESS_ROW_STARTS
+
   BitmapType* has_edge_bitmap_;  // for every local vertices, Index: SBI
   LocalVertex* reorder_map_;     // Index: Pred
   int64_t* degree_;
@@ -1288,6 +1318,55 @@ class GraphConstructor2DCSR {
     }
 #endif
 
+#if COMPRESS_ROW_STARTS
+    // construct sub-row_sums
+    g.sub_row_map_.row_sums_ = static_cast<TwodVertex*>(
+        cache_aligned_xmalloc((row_bitmap_length + 1) * sizeof(TwodVertex)));
+    g.sub_row_map_.row_sums_[0] = 0;
+    for (int64_t i = 0; i < row_bitmap_length; ++i) {
+      int num_rows = __builtin_popcountl(g.sub_row_map_.row_bitmap_[i]);
+      g.sub_row_map_.row_sums_[i + 1] = g.sub_row_map_.row_sums_[i] + num_rows;
+    }
+
+    // construct sub-row_starts
+    const int64_t non_zero_sub_rows =
+        g.sub_row_map_.row_sums_[row_bitmap_length];
+    g.sub_row_map_.row_starts_ = static_cast<uint32_t*>(
+        cache_aligned_xmalloc((non_zero_sub_rows + 1) * sizeof(uint32_t)));
+
+    int64_t cnt = 0;
+    for (int64_t non_zero_idx = 0; non_zero_idx < non_zero_rows;
+         ++non_zero_idx) {
+      const int64_t e_start = g.row_starts_[non_zero_idx];
+      const int64_t e_end = g.row_starts_[non_zero_idx + 1];
+      const int64_t e_length = e_end - e_start;
+      if (e_length > 0) {
+        if (g.row_starts_[non_zero_idx] > UINT32_MAX) {
+          throw_exception("row_starts_[%d] is too large to be cast to uint32_t",
+                          non_zero_idx);
+        }
+        g.sub_row_map_.row_starts_[cnt] =
+            static_cast<uint32_t>(g.row_starts_[non_zero_idx]);
+        ++cnt;
+      }
+    }
+
+    if (cnt != non_zero_sub_rows) {
+      throw_exception("cnt(%d) != non_zero_sub_rows(%d)", cnt,
+                      non_zero_sub_rows);
+    }
+    if (g.row_starts_[non_zero_rows] > UINT32_MAX) {
+      throw_exception("row_starts_[%d] is too large to be cast to uint32_t",
+                      non_zero_rows);
+    }
+    g.sub_row_map_.row_starts_[non_zero_sub_rows] =
+        static_cast<uint32_t>(g.row_starts_[non_zero_rows]);
+
+    // free row_starts
+    free(g.row_starts_);
+    g.row_starts_ = NULL;
+#endif  // #if COMPRESS_ROW_STARTS
+
     if (mpi.isMaster()) print_with_prefix("Finished compacting edge array.");
   }
 
@@ -1311,6 +1390,11 @@ class GraphConstructor2DCSR {
     const int64_t non_zero_rows = g.row_sums_[row_bitmap_length];
     int64_t* row_starts = static_cast<int64_t*>(
         cache_aligned_xmalloc((non_zero_rows + 1) * sizeof(int64_t)));
+
+#if COMPRESS_ROW_STARTS
+    BitmapType* sub_row_bitmap = static_cast<BitmapType*>(
+        cache_aligned_xcalloc(row_bitmap_length * sizeof(BitmapType)));
+#endif  // #if COMPRESS_ROW_STARTS
 
     if (mpi.isMaster()) print_with_prefix("Computing row_starts.");
 #pragma omp parallel for
@@ -1336,6 +1420,16 @@ class GraphConstructor2DCSR {
               __builtin_popcountl(word) + g.row_sums_[word_idx];
           row_starts[row_offset] = edge_offset;
           edge_offset += row_length[i];
+
+#if COMPRESS_ROW_STARTS
+          if (row_length[i] > 1) {
+            BitmapType& bitmap_v = sub_row_bitmap[word_idx];
+            BitmapType add_mask = BitmapType(1) << bit_idx;
+            if ((bitmap_v & add_mask) == 0) {
+              __sync_fetch_and_or(&bitmap_v, add_mask);
+            }
+          }
+#endif  // #if COMPRESS_ROW_STARTS
         } else {
           assert(row_length[i] == 0);
         }
@@ -1376,6 +1470,9 @@ class GraphConstructor2DCSR {
     src_vertexes_ = NULL;
 
     g.row_starts_ = row_starts;
+#if COMPRESS_ROW_STARTS
+    g.sub_row_map_.row_bitmap_ = sub_row_bitmap;
+#endif  // #if COMPRESS_ROW_STARTS
 #if ISOLATE_FIRST_EDGE
     isolateFirstEdge(g);
 #endif  // #if ISOLATE_FIRST_EDGE || DEGREE_ORDER

@@ -1124,11 +1124,19 @@ class BfsBase {
 
   void top_down_send_large(
 #ifdef SMALL_REORDER_BIT
-      EdgeArray edge_array, int64_t start, int64_t end, int orig_lgl,
-      int r_mask, int64_t src
+      EdgeArray edge_array,
 #else
-      int64_t* edge_array, int64_t start, int64_t end, int lgl, int r_mask,
-      int64_t src
+      int64_t* edge_array,
+#endif
+#if COMPRESS_ROW_STARTS
+      uint32_t start, uint32_t end,
+#else
+      int64_t start, int64_t end,
+#endif  // #if COMPRESS_ROW_STARTS
+#ifdef SMALL_REORDER_BIT
+      int orig_lgl, int r_mask, int64_t src
+#else
+      int lgl, int r_mask, int64_t src
 #endif
   ) {
     assert(end > start);
@@ -1143,9 +1151,9 @@ class BfsBase {
       if (s_dest > i) continue;
 
       // search the destination change point with binary search
-      int64_t left = start;
-      int64_t right = end;
-      int64_t next =
+      auto left = start;
+      auto right = end;
+      auto next =
           std::min(left + (right - left) / (mpi.size_2dr - i) * 2, end - 1);
       do {
 #ifdef SMALL_REORDER_BIT
@@ -1274,8 +1282,24 @@ class BfsBase {
 #endif
             );
 #endif  // #if ISOLATE_FIRST_EDGE
+
+#if COMPRESS_ROW_STARTS
+            BitmapType sub_row_bitmap_i =
+                graph_.sub_row_map_.row_bitmap_[word_idx];
+            BitmapType sub_bit_flags = cq_bit & sub_row_bitmap_i;
+            if (sub_bit_flags == BitmapType(0)) {  // e_start == e_end?
+              continue;
+            }
+            TwodVertex non_zero_sub_off =
+                graph_.sub_row_map_.row_sums_[word_idx] +
+                __builtin_popcountl(graph_.sub_row_map_.row_bitmap_[word_idx] &
+                                    low_mask);
+            auto e_start = graph_.sub_row_map_.row_starts_[non_zero_sub_off];
+            auto e_end = graph_.sub_row_map_.row_starts_[non_zero_sub_off + 1];
+#else
             int64_t e_start = graph_.row_starts_[non_zero_off];
             int64_t e_end = graph_.row_starts_[non_zero_off + 1];
+#endif  // #if COMPRESS_ROW_STARTS
             IF_LARGE_EDGE
 #if TOP_DOWN_SEND_LB > 0
             {
@@ -1292,7 +1316,7 @@ class BfsBase {
             ELSE
 #if TOP_DOWN_SEND_LB != 1
             {
-              for (int64_t e = e_start; e < e_end; ++e) {
+              for (auto e = e_start; e < e_end; ++e) {
                 top_down_send(
 #ifdef SMALL_REORDER_BIT
                     edge_array[e], orig_lgl, r_mask, packet_array, src_orig
@@ -1361,8 +1385,25 @@ class BfsBase {
 #endif
             );
 #endif  // #if ISOLATE_FIRST_EDGE
+
+#if COMPRESS_ROW_STARTS
+            BitmapType sub_row_bitmap_i =
+                graph_.sub_row_map_.row_bitmap_[word_idx];
+            if ((sub_row_bitmap_i & mask) == 0) {  // e_start == e_end?
+              continue;
+            }
+            TwodVertex non_zero_sub_off =
+                graph_.sub_row_map_.row_sums_[word_idx] +
+                __builtin_popcountl(graph_.sub_row_map_.row_bitmap_[word_idx] &
+                                    low_mask);
+            uint32_t e_start =
+                graph_.sub_row_map_.row_starts_[non_zero_sub_off];
+            uint32_t e_end =
+                graph_.sub_row_map_.row_starts_[non_zero_sub_off + 1];
+#else
             int64_t e_start = graph_.row_starts_[non_zero_off];
             int64_t e_end = graph_.row_starts_[non_zero_off + 1];
+#endif  // #if COMPRESS_ROW_STARTS
             IF_LARGE_EDGE
 #if TOP_DOWN_SEND_LB > 0
             {
@@ -1379,7 +1420,8 @@ class BfsBase {
             ELSE
 #if TOP_DOWN_SEND_LB != 1
             {
-              for (int64_t e = e_start; e < e_end; ++e) {
+
+              for (auto e = e_start; e < e_end; ++e) {
                 top_down_send(
 #ifdef SMALL_REORDER_BIT
                     edge_array[e], orig_lgl, r_mask, packet_array, src_orig
@@ -2297,7 +2339,14 @@ class BfsBase {
 #else
     const int64_t* __restrict__ isolated_edges = graph_.isolated_edges_;
 #endif
+#if COMPRESS_ROW_STARTS
+    const uint32_t* __restrict__ row_starts = graph_.sub_row_map_.row_starts_;
+    const BitmapType* __restrict__ sub_row_bitmap =
+        graph_.sub_row_map_.row_bitmap_;
+    const TwodVertex* __restrict__ sub_row_sums = graph_.sub_row_map_.row_sums_;
+#else
     const int64_t* __restrict__ row_starts = graph_.row_starts_;
+#endif  // #if COMPRESS_ROW_STARTS
     const LocalVertex* __restrict__ orig_vertexes = graph_.orig_vertexes_;
 #ifdef SMALL_REORDER_BIT
     const EdgeArray edge_array = graph_.edge_array_;
@@ -2321,12 +2370,27 @@ class BfsBase {
       BitmapType visited_i = *(phase_bitmap + blk_bmp_off);
       TwodVertex bmp_row_sums = *(row_sums + phase_bmp_off + blk_bmp_off);
       BitmapType bit_flags = (~visited_i) & row_bmp_i;
+
+#if COMPRESS_ROW_STARTS
+      BitmapType sub_row_bmp_i =
+          *(sub_row_bitmap + phase_bmp_off + blk_bmp_off);
+      TwodVertex bmp_sub_row_sums =
+          *(sub_row_sums + phase_bmp_off + blk_bmp_off);
+#endif  // #if COMPRESS_ROW_STARTS
+
       while (bit_flags != BitmapType(0)) {
         BitmapType vis_bit = bit_flags & (-bit_flags);
         BitmapType mask = vis_bit - 1;
         bit_flags &= ~vis_bit;
         TwodVertex non_zero_idx =
             bmp_row_sums + __builtin_popcountl(row_bmp_i & mask);
+
+#if COMPRESS_ROW_STARTS
+        TwodVertex non_zero_sub_idx =
+            bmp_sub_row_sums + __builtin_popcountl(sub_row_bmp_i & mask);
+        BitmapType sub_bit_flags = vis_bit & sub_row_bmp_i;
+#endif  // #if COMPRESS_ROW_STARTS
+
 #ifdef SMALL_REORDER_BIT
         int tgt_bit_idx = __builtin_ctzll(vis_bit);
         int64_t tgt_group_id = cur_group_id;
@@ -2373,9 +2437,18 @@ class BfsBase {
           VERVOSE(tmp_edge_relax += 1);
           continue;
         }
-        int64_t e_start = row_starts[non_zero_idx];
-        int64_t e_end = row_starts[non_zero_idx + 1];
-        for (int64_t e = e_start; e < e_end; ++e) {
+#if COMPRESS_ROW_STARTS
+        if (sub_bit_flags == BitmapType(0)) {  // e_start == e_end?
+          continue;
+        }
+
+        auto e_start = row_starts[non_zero_sub_idx];
+        auto e_end = row_starts[non_zero_sub_idx + 1];
+#else
+        auto e_start = row_starts[non_zero_idx];
+        auto e_end = row_starts[non_zero_idx + 1];
+#endif  // #if COMPRESS_ROW_STARTS
+        for (auto e = e_start; e < e_end; ++e) {
 #ifdef SMALL_REORDER_BIT
           uint64_t src = edge_array[e];
           uint64_t src_r = reorder_get_r_id_from_edge(src, r_mask, orig_lgl);
@@ -2672,9 +2745,29 @@ class BfsBase {
             continue;
           }
 #endif  // #if ISOLATE_FIRST_EDGE
+
+#if COMPRESS_ROW_STARTS
+          TwodVertex* phase_sub_row_sums =
+              graph_.sub_row_map_.row_sums_ + phase_bmp_off;
+          BitmapType* phase_sub_row_bitmap =
+              graph_.sub_row_map_.row_bitmap_ + phase_bmp_off;
+          BitmapType sub_row_bitmap_i = phase_sub_row_bitmap[word_idx];
+          if ((sub_row_bitmap_i & vis_bit) ==
+              BitmapType(0)) {  // e_start == e_end?
+            continue;
+          }
+
+          TwodVertex non_zero_sub_idx =
+              phase_sub_row_sums[word_idx] +
+              __builtin_popcountl(sub_row_bitmap_i & (vis_bit - 1));
+          uint32_t e_start = graph_.sub_row_map_.row_starts_[non_zero_sub_idx];
+          uint32_t e_end =
+              graph_.sub_row_map_.row_starts_[non_zero_sub_idx + 1];
+#else
           int64_t e_start = graph_.row_starts_[non_zero_idx];
           int64_t e_end = graph_.row_starts_[non_zero_idx + 1];
-          for (int64_t e = e_start; e < e_end; ++e) {
+#endif  // #if COMPRESS_ROW_STARTS
+          for (auto e = e_start; e < e_end; ++e) {
 #ifdef SMALL_REORDER_BIT
             uint64_t src = graph_.edge_array_[e];
             uint64_t src_r = reorder_get_r_id_from_edge(src, r_mask, orig_lgl);
