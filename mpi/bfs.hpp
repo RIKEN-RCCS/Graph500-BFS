@@ -521,6 +521,29 @@ class BfsBase {
   }
   */
 
+  class VertexConverter {
+    const uint32_t orig_local_mask;
+
+   public:
+    VertexConverter(const uint32_t orig_local_mask)
+        : orig_local_mask(orig_local_mask) {}
+
+#ifdef SMALL_REORDER_BIT
+    int32_t operator()(const uint32_t v) { return v & orig_local_mask; }
+#endif
+
+    int32_t operator()(const int64_t v) {
+#ifdef SMALL_REORDER_BIT
+      const int64_t reorder_id =
+          reorder_get_reorder_id_from_edge(v, orig_local_mask);
+
+      return reorder_id;
+#else
+      return v & 0x7FFFFFFF;
+#endif
+    }
+  };
+
   //-------------------------------------------------------------//
   // expand phase
   //-------------------------------------------------------------//
@@ -559,7 +582,14 @@ class BfsBase {
       if (root_owner == mpi.rank_2d) {
         // yes, we have reordered id
         int64_t root_local = vertex_local(root);
+#ifdef SMALL_REORDER_BIT
+        const int64_t group_offset = reorder_get_group_offset_from_local_id(
+            root_local, graph_.local_bits_);
+
+        int64_t reordered = group_offset | graph_.reorder_map_[root_local];
+#else
         int64_t reordered = graph_.reorder_map_[root_local];
+#endif
         root_reordered = (reordered * mpi.size_2d) + root_owner;
 #ifdef PROFILE_REGIONS
         timer_start(current_expand);
@@ -573,8 +603,13 @@ class BfsBase {
         pred_[root_local] = root;
 
         // update visited
-        int64_t word_idx = reordered >> LOG_NBPE;
-        int bit_idx = reordered & NBPE_MASK;
+#ifdef SMALL_REORDER_BIT
+        int64_t bit_id = graph_.local_id_to_bit_id(reordered);
+#else
+        int64_t bit_id = reordered;
+#endif
+        int64_t word_idx = bit_id >> LOG_NBPE;
+        int bit_idx = bit_id & NBPE_MASK;
         ((BitmapType*)new_visited_)[word_idx] |= BitmapType(1) << bit_idx;
       } else {
 #ifdef PROFILE_REGIONS
@@ -588,8 +623,16 @@ class BfsBase {
       }
 
       // update CQ
+#ifdef SMALL_REORDER_BIT
+      SeparatedId root_src(
+          vertex_owner_c(root_reordered),
+          graph_.local_id_to_bit_id(vertex_local(root_reordered)),
+          graph_.orig_local_bits_);
+      cq_list_[0] = root_src.value;
+#else
       SeparatedId root_src = graph_.VtoS(root_reordered);
       cq_list_[0] = root_src.value;
+#endif
       cq_size_ = 1;
     } else {
       cq_size_ = 0;
@@ -709,6 +752,8 @@ class BfsBase {
         TwodVertex* dst = outbuf + offset;
         for (int c = 0; c < len; ++c) {
           dst[c] = src[c] | shifted_rc;
+          // print_with_prefix("[dump] 31 %d: src = %d, dst = %d", c, src[c],
+          // dst[c]);
         }
         offset += len;
       }
@@ -757,7 +802,11 @@ class BfsBase {
     TRACER(td_expand);
     // expand NQ within a processor column
     // convert NQ to a SRC format
+#ifdef SMALL_REORDER_BIT
+    TwodVertex shifted_c = TwodVertex(mpi.rank_2dc) << graph_.orig_local_bits_;
+#else
     TwodVertex shifted_c = TwodVertex(mpi.rank_2dc) << graph_.local_bits_;
+#endif
     int bitmap_width = get_bitmap_size_local();
     // old_visited is used as a temporal buffer
     TwodVertex* nq_list = (TwodVertex*)old_visited_;
@@ -822,7 +871,16 @@ class BfsBase {
         BitmapType bmp_i = bmp(i);
         while (bmp_i != 0) {
           TwodVertex bit_idx = __builtin_ctzl(bmp_i);
+#ifdef SMALL_REORDER_BIT
+          // convert to local id from bit_id
+          // because bit_id is based by num_group_verts_ but local_id is based
+          // by PRM::REORDER_UNIT
+          const int64_t bit_id = (i * NBPE + bit_idx);
+
+          *(dst++) = bit_id | shifted_rc;
+#else
           *(dst++) = (i * NBPE + bit_idx) | shifted_rc;
+#endif
           bmp_i &= bmp_i - 1;
         }
       }
@@ -938,6 +996,10 @@ class BfsBase {
     TRACER(bu_expand_nq_list);
     assert(mpi.isYdimAvailable() || (visited_buffer_orig_ == visited_buffer_));
     int lgl = graph_.local_bits_;
+#ifdef SMALL_REORDER_BIT
+    int orig_lgl = graph_.orig_local_bits_;
+    int orig_lgl_mask = (1 << graph_.orig_local_bits_) - 1;
+#endif
     int L = graph_.num_local_verts_;
 
     int node_nq_size = bottom_up_make_nq_list(
@@ -959,7 +1021,13 @@ class BfsBase {
 
       for (int i = begin; i < end; ++i) {
         SeparatedId dst(nq_recv_buf_[i]);
+#ifdef SMALL_REORDER_BIT
+        TwodVertex dst_c = dst.value >> orig_lgl;
+
+        TwodVertex compact = dst_c * L + (dst.value & orig_lgl_mask);
+#else
         TwodVertex compact = dst.compact(lgl, L);
+#endif
         TwodVertex word_idx = compact >> LOG_NBPE;
         int bit_idx = compact & NBPE_MASK;
         shared_visited_[word_idx] |= BitmapType(1) << bit_idx;
@@ -996,9 +1064,15 @@ class BfsBase {
     } else {
       // visited_buffer_ is used as a temporal buffer
       TwodVertex* nq_list = (TwodVertex*)visited_buffer_;
+#ifdef SMALL_REORDER_BIT
+      int nq_size = bottom_up_make_nq_list(
+          false, TwodVertex(mpi.rank_2dc) << graph_.orig_local_bits_,
+          (TwodVertex*)nq_list);
+#else
       int nq_size = bottom_up_make_nq_list(
           false, TwodVertex(mpi.rank_2dc) << graph_.local_bits_,
           (TwodVertex*)nq_list);
+#endif
       top_down_expand_nq_list(nq_list, nq_size);
     }
   }
@@ -1007,14 +1081,23 @@ class BfsBase {
   // top-down search
   //-------------------------------------------------------------//
 
-  void top_down_send(int64_t tgt, int lgl, int r_mask,
-                     LocalPacket* packet_array, int64_t src
+  void top_down_send(
+#ifdef SMALL_REORDER_BIT
+      int64_t tgt, int orig_lgl, int r_mask, LocalPacket* packet_array,
+      int64_t src
+#else
+      int64_t tgt, int lgl, int r_mask, LocalPacket* packet_array, int64_t src
+#endif
 #if PROFILING_MODE
-                     ,
-                     profiling::TimeSpan& ts_commit
+      ,
+      profiling::TimeSpan& ts_commit
 #endif
   ) {
+#ifdef SMALL_REORDER_BIT
+    int dest = (tgt >> orig_lgl) & r_mask;
+#else
     int dest = (tgt >> lgl) & r_mask;
+#endif
     LocalPacket& pk = packet_array[dest];
     if (pk.length > LocalPacket::TOP_DOWN_LENGTH - 3) {  // low probability
       PROF(profiling::TimeKeeper tk_commit);
@@ -1023,20 +1106,40 @@ class BfsBase {
       pk.src = -1;
       pk.length = 0;
     }
+
     if (pk.src != src) {  // TODO: use conditional branch
       pk.src = src;
       pk.data.t[pk.length++] = (src >> 32) | 0x80000000u;
       pk.data.t[pk.length++] = (uint32_t)src;
     }
+#ifdef SMALL_REORDER_BIT
+    // tgt is element of edge array so bit order is |orig_id|R|reorder_id|
+    // create bits with |group_id|reorder_id|
+    pk.data.t[pk.length++] =
+        reorder_get_reorder_id_from_edge(tgt, (uint32_t(1) << orig_lgl) - 1);
+#else
     pk.data.t[pk.length++] = tgt & ((uint32_t(1) << lgl) - 1);
+#endif
   }
 
-  void top_down_send_large(int64_t* edge_array, int64_t start, int64_t end,
-                           int lgl, int r_mask, int64_t src) {
+  void top_down_send_large(
+#ifdef SMALL_REORDER_BIT
+      EdgeArray edge_array, int64_t start, int64_t end, int orig_lgl,
+      int r_mask, int64_t src
+#else
+      int64_t* edge_array, int64_t start, int64_t end, int lgl, int r_mask,
+      int64_t src
+#endif
+  ) {
     assert(end > start);
     for (int i = 0; i < mpi.size_2dr; ++i) {
       if (start >= end) break;
+#ifdef SMALL_REORDER_BIT
+      int s_dest =
+          reorder_get_r_id_from_edge(edge_array[start], r_mask, orig_lgl);
+#else
       int s_dest = (edge_array[start] >> lgl) & r_mask;
+#endif
       if (s_dest > i) continue;
 
       // search the destination change point with binary search
@@ -1045,7 +1148,12 @@ class BfsBase {
       int64_t next =
           std::min(left + (right - left) / (mpi.size_2dr - i) * 2, end - 1);
       do {
+#ifdef SMALL_REORDER_BIT
+        int dest =
+            reorder_get_r_id_from_edge(edge_array[next], r_mask, orig_lgl);
+#else
         int dest = (edge_array[next] >> lgl) & r_mask;
+#endif
         if (dest > i) {
           right = next;
         } else {
@@ -1054,7 +1162,12 @@ class BfsBase {
         next = (left + right) / 2;
       } while (left < next);
       // start ... right -> i
+#ifdef SMALL_REORDER_BIT
+      // in top_down, only needed reorder_id so send only low_ptr
+      td_comm_.put_ptr(edge_array.low_ptr + start, right - start, src, i);
+#else
       td_comm_.put_ptr(edge_array + start, right - start, src, i);
+#endif
       start = right;
     }
     assert(start == end);
@@ -1083,7 +1196,11 @@ class BfsBase {
       VERVOSE(int64_t num_edge_relax = 0);
       VERVOSE(int64_t num_large_edge = 0);
       // int max_threads = omp_get_num_threads();
+#ifdef SMALL_REORDER_BIT
+      EdgeArray edge_array = graph_.edge_array_;
+#else
       int64_t* edge_array = graph_.edge_array_;
+#endif
       LocalPacket* packet_array =
           thread_local_buffer_[omp_get_thread_num()]->fold_packet;
       if (clear_packet_buffer) {
@@ -1093,12 +1210,18 @@ class BfsBase {
         }
       }
       int lgl = graph_.local_bits_;
+      // int r_bits = graph_.r_bits_;
       // int vertex_bits = graph_.r_bits_ + lgl;
       int r_mask = (1 << graph_.r_bits_) - 1;
       int P = mpi.size_2d;
       int R = mpi.size_2dr;
       int r = mpi.rank_2dr;
+#ifdef SMALL_REORDER_BIT
+      int orig_lgl = graph_.orig_local_bits_;
+      uint32_t orig_lgl_mask = (uint32_t(1) << orig_lgl) - 1;
+#else
       uint32_t local_mask = (uint32_t(1) << lgl) - 1;
+#endif
       int64_t L = graph_.num_local_verts_;
 
       // count total edges
@@ -1120,15 +1243,34 @@ class BfsBase {
             TwodVertex src_c = word_idx / get_bitmap_size_local();  // TODO:
             TwodVertex non_zero_off =
                 bmp_row_sums + __builtin_popcountl(row_bitmap_i & low_mask);
+#ifdef SMALL_REORDER_BIT
+            int src_word_idx = word_idx % get_bitmap_size_local();
+            int bit_idx = __builtin_ctzll(cq_bit);
+            int64_t group_id =
+                (src_word_idx * NBPE + bit_idx) / graph_.num_group_verts_;
+            int64_t group_offset = group_id << graph_.local_bits_;
+
+            int64_t src_orig =
+                int64_t(group_offset | graph_.orig_vertexes_[non_zero_off]) *
+                    P +
+                src_c * R + r;
+#else
             int64_t src_orig =
                 int64_t(graph_.orig_vertexes_[non_zero_off]) * P + src_c * R +
                 r;
+#endif
 #if ISOLATE_FIRST_EDGE
-            top_down_send(graph_.isolated_edges_[non_zero_off], lgl, r_mask,
-                          packet_array, src_orig
+            top_down_send(
+#ifdef SMALL_REORDER_BIT
+                graph_.isolated_edges_[non_zero_off], orig_lgl, r_mask,
+                packet_array, src_orig
+#else
+                graph_.isolated_edges_[non_zero_off], lgl, r_mask, packet_array,
+                src_orig
+#endif
 #if PROFILING_MODE
-                          ,
-                          ts_commit
+                ,
+                ts_commit
 #endif
             );
 #endif  // #if ISOLATE_FIRST_EDGE
@@ -1137,8 +1279,13 @@ class BfsBase {
             IF_LARGE_EDGE
 #if TOP_DOWN_SEND_LB > 0
             {
+#ifdef SMALL_REORDER_BIT
+              top_down_send_large(edge_array, e_start, e_end, orig_lgl, r_mask,
+                                  src_orig);
+#else
               top_down_send_large(edge_array, e_start, e_end, lgl, r_mask,
                                   src_orig);
+#endif
               VERVOSE(num_large_edge += e_end - e_start);
             }
 #endif  // #if TOP_DOWN_SEND_LB > 0
@@ -1146,10 +1293,15 @@ class BfsBase {
 #if TOP_DOWN_SEND_LB != 1
             {
               for (int64_t e = e_start; e < e_end; ++e) {
-                top_down_send(edge_array[e], lgl, r_mask, packet_array, src_orig
+                top_down_send(
+#ifdef SMALL_REORDER_BIT
+                    edge_array[e], orig_lgl, r_mask, packet_array, src_orig
+#else
+                    edge_array[e], lgl, r_mask, packet_array, src_orig
+#endif
 #if PROFILING_MODE
-                              ,
-                              ts_commit
+                    ,
+                    ts_commit
 #endif
                 );
               }
@@ -1157,32 +1309,55 @@ class BfsBase {
 #endif  // #if TOP_DOWN_SEND_LB != 1
             VERVOSE(num_edge_relax += e_end - e_start + 1);
           }  // while(bit_flags != BitmapType(0)) {
-        }    // #pragma omp for // implicit barrier
+        }  // #pragma omp for // implicit barrier
       } else {
         TwodVertex* cq_list = (TwodVertex*)cq_list_;
+
 #pragma omp for
         for (int64_t i = 0; i < int64_t(cq_size_); ++i) {
           SeparatedId src(cq_list[i]);
+#ifdef SMALL_REORDER_BIT
+          TwodVertex src_c = src.value >> orig_lgl;
+          TwodVertex compact = src_c * L + (src.value & orig_lgl_mask);
+#else
           TwodVertex src_c = src.value >> lgl;
           TwodVertex compact = src_c * L + (src.value & local_mask);
+#endif
           TwodVertex word_idx = compact >> LOG_NBPE;
           int bit_idx = compact & NBPE_MASK;
           BitmapType row_bitmap_i = graph_.row_bitmap_[word_idx];
           BitmapType mask = BitmapType(1) << bit_idx;
           if (row_bitmap_i & mask) {
             BitmapType low_mask = (BitmapType(1) << bit_idx) - 1;
-            TwodVertex non_zero_off =
-                graph_.row_sums_[word_idx] +
+            int bit_idx =
                 __builtin_popcountl(graph_.row_bitmap_[word_idx] & low_mask);
+            TwodVertex non_zero_off = graph_.row_sums_[word_idx] + bit_idx;
+#ifdef SMALL_REORDER_BIT
+            uint64_t group_offset =
+                ((src.value & orig_lgl_mask) / graph_.num_group_verts_) << lgl;
+
+            uint64_t src_orig =
+                uint64_t(group_offset | graph_.orig_vertexes_[non_zero_off]) *
+                    P +
+                src_c * R + r;
+#else
             int64_t src_orig =
                 int64_t(graph_.orig_vertexes_[non_zero_off]) * P + src_c * R +
                 r;
+#endif
+
 #if ISOLATE_FIRST_EDGE
-            top_down_send(graph_.isolated_edges_[non_zero_off], lgl, r_mask,
-                          packet_array, src_orig
+            top_down_send(
+#ifdef SMALL_REORDER_BIT
+                graph_.isolated_edges_[non_zero_off], orig_lgl, r_mask,
+                packet_array, src_orig
+#else
+                graph_.isolated_edges_[non_zero_off], lgl, r_mask, packet_array,
+                src_orig
+#endif
 #if PROFILING_MODE
-                          ,
-                          ts_commit
+                ,
+                ts_commit
 #endif
             );
 #endif  // #if ISOLATE_FIRST_EDGE
@@ -1191,8 +1366,13 @@ class BfsBase {
             IF_LARGE_EDGE
 #if TOP_DOWN_SEND_LB > 0
             {
+#ifdef SMALL_REORDER_BIT
+              top_down_send_large(edge_array, e_start, e_end, orig_lgl, r_mask,
+                                  src_orig);
+#else
               top_down_send_large(edge_array, e_start, e_end, lgl, r_mask,
                                   src_orig);
+#endif
               VERVOSE(num_large_edge += e_end - e_start);
             }
 #endif  // #if TOP_DOWN_SEND_LB > 0
@@ -1200,10 +1380,15 @@ class BfsBase {
 #if TOP_DOWN_SEND_LB != 1
             {
               for (int64_t e = e_start; e < e_end; ++e) {
-                top_down_send(edge_array[e], lgl, r_mask, packet_array, src_orig
+                top_down_send(
+#ifdef SMALL_REORDER_BIT
+                    edge_array[e], orig_lgl, r_mask, packet_array, src_orig
+#else
+                    edge_array[e], lgl, r_mask, packet_array, src_orig
+#endif
 #if PROFILING_MODE
-                              ,
-                              ts_commit
+                    ,
+                    ts_commit
 #endif
                 );
               }
@@ -1211,7 +1396,7 @@ class BfsBase {
 #endif  // #if TOP_DOWN_SEND_LB != 1
             VERVOSE(num_edge_relax += e_end - e_start + 1);
           }  // if(row_bitmap_i & mask) {
-        }    // #pragma omp for // implicit barrier
+        }  // #pragma omp for // implicit barrier
       }
 
       // flush buffer
@@ -1246,7 +1431,8 @@ class BfsBase {
 
     td_comm_.prepare();
     top_down_parallel_section(bitmap_or_list_);
-    td_comm_.run_with_ptr();
+    td_comm_.run_with_ptr(
+        VertexConverter((uint64_t(1) << graph_.orig_local_bits_) - 1));
 
     PROF(profiling::TimeKeeper tk_all);
     // flush NQ buffer and count NQ total
@@ -1268,8 +1454,14 @@ class BfsBase {
     for (int i = 0; i < (int)nq_.stack_.size(); i++)
 #pragma omp parallel for reduction( \
         + : global_nq_edges_) if (nq_.stack_[i]->length > 500)
-      for (int j = 0; j < nq_.stack_[i]->length; j++)
+      for (int j = 0; j < nq_.stack_[i]->length; j++) {
+#ifdef SMALL_REORDER_BIT
+        global_nq_edges_ +=
+            graph_.degree_[graph_.bit_id_to_local_id(nq_.stack_[i]->v[j])];
+#else
         global_nq_edges_ += graph_.degree_[nq_.stack_[i]->v[j]];
+#endif
+      }
 
     //  printf("%d\n", (int)global_nq_edges_);
     //  for(int i=0;i<(int)nq_.stack_.size();i++){
@@ -1321,7 +1513,10 @@ class BfsBase {
 
       // for id converter //
       int lgl = graph_.local_bits_;
+#ifdef SMALL_REORDER_BIT
+#else
       LocalVertex lmask = (LocalVertex(1) << lgl) - 1;
+#endif
       // ------------------- //
 
       while (true) {
@@ -1340,18 +1535,37 @@ class BfsBase {
           int off_end = std::min(length, off_start + width_per_split);
 
           for (int i = off_start; i < off_end; ++i) {
+#ifdef SMALL_REORDER_BIT
+            TwodVertex tgt_local = ptr[i];
+#else
             LocalVertex tgt_local = ptr[i] & lmask;
+#endif
             if (growing) {
               // TODO: which is better ?
               // LocalVertex tgt_orig = invert_map[tgt_local];
+#ifdef SMALL_REORDER_BIT
+              const TwodVertex bit_id = tgt_local;
+
+              const TwodVertex word_idx = bit_id >> LOG_NBPE;
+              const int bit_idx = bit_id & NBPE_MASK;
+#else
               const TwodVertex word_idx = tgt_local >> LOG_NBPE;
               const int bit_idx = tgt_local & NBPE_MASK;
+#endif
               const BitmapType mask = BitmapType(1) << bit_idx;
               if ((visited[word_idx] & mask) ==
                   0) {  // if this vertex has not visited
                 if ((__sync_fetch_and_or(&visited[word_idx], mask) & mask) ==
                     0) {
+#ifdef SMALL_REORDER_BIT
+                  uint64_t group_offset = (tgt_local / graph_.num_group_verts_)
+                                          << lgl;
+                  TwodVertex tgt_orig =
+                      group_offset |
+                      invert_map[graph_.bit_id_to_local_id(tgt_local)];
+#else
                   LocalVertex tgt_orig = invert_map[tgt_local];
+#endif
                   assert(pred[tgt_orig] == -1);
                   pred[tgt_orig] = pred_v;
                   if (buf->full()) {
@@ -1362,7 +1576,15 @@ class BfsBase {
                 }
               }
             } else {
+#ifdef SMALL_REORDER_BIT
+              uint64_t group_offset = (tgt_local / graph_.num_group_verts_)
+                                      << lgl;
+              TwodVertex tgt_orig =
+                  group_offset |
+                  invert_map[graph_.bit_id_to_local_id(tgt_local)];
+#else
               LocalVertex tgt_orig = invert_map[tgt_local];
+#endif
               if (pred[tgt_orig] == -1) {
                 if (__sync_bool_compare_and_swap(&pred[tgt_orig], -1, pred_v)) {
                   if (buf->full()) {
@@ -1398,7 +1620,10 @@ class BfsBase {
 
     // for id converter //
     int lgl = graph_.local_bits_;
+#ifdef SMALL_REORDER_BIT
+#else
     LocalVertex lmask = (LocalVertex(1) << lgl) - 1;
+#endif
     // ------------------- //
 
     for (int i = 0; i < length; ++i) {
@@ -1406,6 +1631,7 @@ class BfsBase {
       if (v & 0x80000000u) {
         int64_t src = (int64_t(v & 0xFFFF) << 32) | stream[i + 1];
         pred_v = src | (int64_t(cur_level) << 48);
+
         if (v & 0x40000000u) {
           int length_i = stream[i + 2];
 #if TOP_DOWN_RECV_LB
@@ -1414,18 +1640,38 @@ class BfsBase {
           {
             assert(pred_v != -1);
             for (int c = 0; c < length_i; ++c) {
+#ifdef SMALL_REORDER_BIT
+              TwodVertex tgt_local = stream[i + 3 + c];
+#else
               LocalVertex tgt_local = stream[i + 3 + c] & lmask;
+#endif
               if (growing) {
                 // TODO: which is better ?
                 // LocalVertex tgt_orig = invert_map[tgt_local];
+#ifdef SMALL_REORDER_BIT
+                const TwodVertex bit_id = tgt_local;
+
+                const TwodVertex word_idx = bit_id >> LOG_NBPE;
+                const int bit_idx = bit_id & NBPE_MASK;
+#else
                 const TwodVertex word_idx = tgt_local >> LOG_NBPE;
                 const int bit_idx = tgt_local & NBPE_MASK;
+#endif
                 const BitmapType mask = BitmapType(1) << bit_idx;
+
                 if ((visited[word_idx] & mask) ==
                     0) {  // if this vertex has not visited
                   if ((__sync_fetch_and_or(&visited[word_idx], mask) & mask) ==
                       0) {
+#ifdef SMALL_REORDER_BIT
+                    uint64_t group_offset =
+                        (tgt_local / graph_.num_group_verts_) << lgl;
+                    TwodVertex tgt_orig =
+                        group_offset |
+                        invert_map[graph_.bit_id_to_local_id(tgt_local)];
+#else
                     LocalVertex tgt_orig = invert_map[tgt_local];
+#endif
                     assert(pred[tgt_orig] == -1);
                     pred[tgt_orig] = pred_v;
                     if (buf->full()) {
@@ -1436,7 +1682,15 @@ class BfsBase {
                   }
                 }
               } else {
+#ifdef SMALL_REORDER_BIT
+                uint64_t group_offset = (tgt_local / graph_.num_group_verts_)
+                                        << lgl;
+                TwodVertex tgt_orig =
+                    group_offset |
+                    invert_map[graph_.bit_id_to_local_id(tgt_local)];
+#else
                 LocalVertex tgt_orig = invert_map[tgt_local];
+#endif
                 if (pred[tgt_orig] == -1) {
                   if (__sync_bool_compare_and_swap(&pred[tgt_orig], -1,
                                                    pred_v)) {
@@ -1466,17 +1720,37 @@ class BfsBase {
       } else {
         assert(pred_v != -1);
 
+#ifdef SMALL_REORDER_BIT
+        TwodVertex tgt_local = v;
+#else
         LocalVertex tgt_local = v & lmask;
+#endif
         if (growing) {
           // TODO: which is better ?
           // LocalVertex tgt_orig = invert_map[tgt_local];
+#ifdef SMALL_REORDER_BIT
+          const TwodVertex bit_id = tgt_local;
+
+          const TwodVertex word_idx = bit_id >> LOG_NBPE;
+          const int bit_idx = bit_id & NBPE_MASK;
+#else
           const TwodVertex word_idx = tgt_local >> LOG_NBPE;
           const int bit_idx = tgt_local & NBPE_MASK;
+#endif
           const BitmapType mask = BitmapType(1) << bit_idx;
+
           if ((visited[word_idx] & mask) ==
               0) {  // if this vertex has not visited
             if ((__sync_fetch_and_or(&visited[word_idx], mask) & mask) == 0) {
+#ifdef SMALL_REORDER_BIT
+              uint64_t group_offset = (tgt_local / graph_.num_group_verts_)
+                                      << lgl;
+              TwodVertex tgt_orig =
+                  group_offset |
+                  invert_map[graph_.bit_id_to_local_id(tgt_local)];
+#else
               LocalVertex tgt_orig = invert_map[tgt_local];
+#endif
               assert(pred[tgt_orig] == -1);
               pred[tgt_orig] = pred_v;
               if (buf->full()) {
@@ -1487,7 +1761,14 @@ class BfsBase {
             }
           }
         } else {
+#ifdef SMALL_REORDER_BIT
+          uint64_t group_offset = (tgt_local / graph_.num_group_verts_) << lgl;
+          TwodVertex tgt_orig =
+              group_offset | invert_map[graph_.bit_id_to_local_id(tgt_local)];
+#else
           LocalVertex tgt_orig = invert_map[tgt_local];
+#endif
+
           if (pred[tgt_orig] == -1) {
             if (__sync_bool_compare_and_swap(&pred[tgt_orig], -1, pred_v)) {
               if (buf->full()) {
@@ -2003,17 +2284,36 @@ class BfsBase {
     TwodVertex L = graph_.num_local_verts_;
     int r_bits = graph_.r_bits_;
     int orig_lgl = graph_.orig_local_bits_;
+#ifdef SMALL_REORDER_BIT
+    uint64_t orig_lgl_mask = (int64_t(1) << orig_lgl) - 1;
+    int64_t r_mask = (int64_t(1) << r_bits) - 1;
+#endif
 
     const BitmapType* __restrict__ row_bitmap = graph_.row_bitmap_;
     const BitmapType* __restrict__ shared_visited = shared_visited_;
     const TwodVertex* __restrict__ row_sums = graph_.row_sums_;
+#ifdef SMALL_REORDER_BIT
+    const EdgeArray isolated_edges = graph_.isolated_edges_;
+#else
     const int64_t* __restrict__ isolated_edges = graph_.isolated_edges_;
+#endif
     const int64_t* __restrict__ row_starts = graph_.row_starts_;
     const LocalVertex* __restrict__ orig_vertexes = graph_.orig_vertexes_;
+#ifdef SMALL_REORDER_BIT
+    const EdgeArray edge_array = graph_.edge_array_;
+#else
     const int64_t* __restrict__ edge_array = graph_.edge_array_;
+#endif
 
     // TwodVertex lmask = (TwodVertex(1) << lgl) - 1;
     int num_send = 0;
+#ifdef SMALL_REORDER_BIT
+    TwodVertex tmp_word_idx =
+        (phase_bmp_off + off_start) % get_bitmap_size_local();
+    int64_t cur_group_id = tmp_word_idx * NBPE / graph_.num_group_verts_;
+    int64_t cur_bit_cnt = tmp_word_idx * NBPE % graph_.num_group_verts_;
+    int64_t max_group_id = graph_.num_local_verts_ / graph_.num_group_verts_;
+#endif
 #if CONSOLIDATE_IFE_PROC
     for (int64_t blk_bmp_off = off_start; blk_bmp_off < off_end;
          ++blk_bmp_off) {
@@ -2027,16 +2327,48 @@ class BfsBase {
         bit_flags &= ~vis_bit;
         TwodVertex non_zero_idx =
             bmp_row_sums + __builtin_popcountl(row_bmp_i & mask);
+#ifdef SMALL_REORDER_BIT
+        int tgt_bit_idx = __builtin_ctzll(vis_bit);
+        int64_t tgt_group_id = cur_group_id;
+        if (cur_bit_cnt + tgt_bit_idx >= graph_.num_group_verts_) {
+          ++tgt_group_id;
+          if (tgt_group_id >= max_group_id) tgt_group_id = 0;
+        }
+        int64_t tgt_group_offset = tgt_group_id << graph_.local_bits_;
+
+        TwodVertex tgt_orig = tgt_group_offset | orig_vertexes[non_zero_idx];
+#else
         LocalVertex tgt_orig = orig_vertexes[non_zero_idx];
+#endif
         // short cut
+#ifdef SMALL_REORDER_BIT
+        uint64_t src = isolated_edges[non_zero_idx];
+        // edge_array to reorder vertex
+        uint64_t src_r = reorder_get_r_id_from_edge(src, r_mask, orig_lgl);
+        uint64_t src_local =
+            reorder_get_reorder_id_from_edge(src, orig_lgl_mask);
+
+        // reorder id to bitmap index
+        TwodVertex bit_idx = src_r * L + (src_local & orig_lgl_mask);
+#else
         int64_t src = isolated_edges[non_zero_idx];
         TwodVertex bit_idx =
             SeparatedId(SeparatedId(src).low(r_bits + lgl)).compact(lgl, L);
+#endif
         if (shared_visited[bit_idx >> PRM::LOG_NBPE] &
             (BitmapType(1) << (bit_idx & PRM::NBPE_MASK))) {
           // add to next queue
           visited_i |= vis_bit;
+#ifdef SMALL_REORDER_BIT
+          uint64_t src_group_id = src_local / graph_.num_group_verts_;
+          uint64_t src_orig =
+              ((src & (~orig_lgl_mask)) >> lgl) | (src_group_id);
+
+          // send_buf: (|orig_id(lgl)|r_id|group_id|)|(tgt_orig_id)
+          buffer->data.b[num_send++] = (src_orig << orig_lgl) | tgt_orig;
+#else
           buffer->data.b[num_send++] = ((src >> lgl) << orig_lgl) | tgt_orig;
+#endif
           // end this row
           VERVOSE(tmp_edge_relax += 1);
           continue;
@@ -2044,20 +2376,48 @@ class BfsBase {
         int64_t e_start = row_starts[non_zero_idx];
         int64_t e_end = row_starts[non_zero_idx + 1];
         for (int64_t e = e_start; e < e_end; ++e) {
+#ifdef SMALL_REORDER_BIT
+          uint64_t src = edge_array[e];
+          uint64_t src_r = reorder_get_r_id_from_edge(src, r_mask, orig_lgl);
+          uint64_t src_local =
+              reorder_get_reorder_id_from_edge(src, orig_lgl_mask);
+
+          TwodVertex bit_idx = src_r * L + (src_local & orig_lgl_mask);
+#else
           int64_t src = edge_array[e];
           TwodVertex bit_idx =
               SeparatedId(SeparatedId(src).low(r_bits + lgl)).compact(lgl, L);
+#endif
           if (shared_visited[bit_idx >> PRM::LOG_NBPE] &
               (BitmapType(1) << (bit_idx & PRM::NBPE_MASK))) {
             // add to next queue
             visited_i |= vis_bit;
+#ifdef SMALL_REORDER_BIT
+            uint64_t src_group_id = src_local / graph_.num_group_verts_;
+            uint64_t src_orig =
+                ((src & (~orig_lgl_mask)) >> lgl) | (src_group_id);
+
+            // send_buf: (|orig_id(lgl)|r_id|group_id|)|(tgt_orig_id)
+            buffer->data.b[num_send++] = (src_orig << orig_lgl) | tgt_orig;
+#else
             buffer->data.b[num_send++] = ((src >> lgl) << orig_lgl) | tgt_orig;
+#endif
             // end this row
             VERVOSE(tmp_edge_relax += e - e_start + 1);
             break;
           }
         }
       }  // while(bit_flags != BitmapType(0)) {
+
+#ifdef SMALL_REORDER_BIT
+      cur_bit_cnt += NBPE;
+      if (cur_bit_cnt >= graph_.num_group_verts_) {
+        ++cur_group_id;
+        if (cur_group_id >= max_group_id) cur_group_id = 0;
+        cur_bit_cnt -= graph_.num_group_verts_;
+      }
+#endif
+
       // write back
       *(phase_bitmap + blk_bmp_off) = visited_i;
     }  // #pragma omp for
@@ -2224,6 +2584,10 @@ class BfsBase {
     int r_bits = graph_.r_bits_;
     TwodVertex L = graph_.num_local_verts_;
     int orig_lgl = graph_.orig_local_bits_;
+#ifdef SMALL_REORDER_BIT
+    int r_mask = (1 << r_bits) - 1;
+    int orig_lgl_mask = (1 << orig_lgl) - 1;
+#endif
     // TwodVertex phase_vertex_off = L / BU_SUBSTEP * (data.tag.region_id %
     // BU_SUBSTEP);
     VERVOSE(int tmp_num_blocks = 0);
@@ -2250,25 +2614,59 @@ class BfsBase {
       do {
         vertex_enabled[i] = 1;
         TwodVertex tgt = phase_list[i];
+#ifdef SMALL_REORDER_BIT
+        const TwodVertex bit_id = tgt;
+
+        const TwodVertex word_idx = bit_id >> LOG_NBPE;
+        const int bit_idx = bit_id & NBPE_MASK;
+#else
         TwodVertex word_idx = tgt >> LOG_NBPE;
         int bit_idx = tgt & NBPE_MASK;
+#endif
         BitmapType vis_bit = (BitmapType(1) << bit_idx);
         BitmapType row_bitmap_i = phase_row_bitmap[word_idx];
         if (row_bitmap_i & vis_bit) {  // I have edges for this vertex ?
           TwodVertex non_zero_idx =
               phase_row_sums[word_idx] +
               __builtin_popcountl(row_bitmap_i & (vis_bit - 1));
+#ifdef SMALL_REORDER_BIT
+          int64_t group_id =
+              (word_idx * NBPE + bit_idx) / graph_.num_group_verts_;
+          int64_t group_offset = group_id << graph_.local_bits_;
+
+          TwodVertex tgt_orig =
+              group_offset | graph_.orig_vertexes_[non_zero_idx];
+#else
           LocalVertex tgt_orig = graph_.orig_vertexes_[non_zero_idx];
+#endif
 #if ISOLATE_FIRST_EDGE
+#ifdef SMALL_REORDER_BIT
+          uint64_t src = graph_.isolated_edges_[non_zero_idx];
+          uint64_t src_r = reorder_get_r_id_from_edge(src, r_mask, orig_lgl);
+          uint64_t src_local =
+              reorder_get_reorder_id_from_edge(src, orig_lgl_mask);
+
+          TwodVertex bit_idx = src_r * L + src_local;
+#else
           int64_t src = graph_.isolated_edges_[non_zero_idx];
           TwodVertex bit_idx =
               SeparatedId(SeparatedId(src).low(r_bits + lgl)).compact(lgl, L);
+#endif
           if (shared_visited_[bit_idx >> LOG_NBPE] &
               (BitmapType(1) << (bit_idx & NBPE_MASK))) {
             // add to next queue
             vertex_enabled[i] = 0;
             --num_enabled;
+#ifdef SMALL_REORDER_BIT
+            uint64_t src_group_id = src_local / graph_.num_group_verts_;
+            uint64_t src_orig =
+                ((src & (~orig_lgl_mask)) >> lgl) | (src_group_id);
+
+            // send_buf: (|orig_id(lgl)|r_id|group_id|)|(tgt_orig_id)
+            buffer->data.b[num_send++] = (src_orig << orig_lgl) | tgt_orig;
+#else
             buffer->data.b[num_send++] = ((src >> lgl) << orig_lgl) | tgt_orig;
+#endif
             // end this row
             VERVOSE(tmp_edge_relax += 1);
             continue;
@@ -2277,16 +2675,34 @@ class BfsBase {
           int64_t e_start = graph_.row_starts_[non_zero_idx];
           int64_t e_end = graph_.row_starts_[non_zero_idx + 1];
           for (int64_t e = e_start; e < e_end; ++e) {
+#ifdef SMALL_REORDER_BIT
+            uint64_t src = graph_.edge_array_[e];
+            uint64_t src_r = reorder_get_r_id_from_edge(src, r_mask, orig_lgl);
+            uint64_t src_local =
+                reorder_get_reorder_id_from_edge(src, orig_lgl_mask);
+
+            TwodVertex bit_idx = src_r * L + src_local;
+#else
             int64_t src = graph_.edge_array_[e];
             TwodVertex bit_idx =
                 SeparatedId(SeparatedId(src).low(r_bits + lgl)).compact(lgl, L);
+#endif
             if (shared_visited_[bit_idx >> LOG_NBPE] &
                 (BitmapType(1) << (bit_idx & NBPE_MASK))) {
               // add to next queue
               vertex_enabled[i] = 0;
               --num_enabled;
+#ifdef SMALL_REORDER_BIT
+              uint64_t src_group_id = src_local / graph_.num_group_verts_;
+              uint64_t src_orig =
+                  ((src & (~orig_lgl_mask)) >> lgl) | (src_group_id);
+
+              // send_buf: (|orig_id(lgl)|r_id|group_id|)|(tgt_orig_id)
+              buffer->data.b[num_send++] = (src_orig << orig_lgl) | tgt_orig;
+#else
               buffer->data.b[num_send++] =
                   ((src >> lgl) << orig_lgl) | tgt_orig;
+#endif
               // end this row
               VERVOSE(tmp_edge_relax += e - e_start + 1);
               break;
@@ -2676,7 +3092,13 @@ class BfsBase {
       int r_bits = this_->graph_.r_bits_;
       int64_t r_mask = ((1 << r_bits) - 1);
       int orig_lgl = this_->graph_.orig_local_bits_;
+#ifdef SMALL_REORDER_BIT
+      int lgl = this_->graph_.local_bits_;
+      int group_bits = orig_lgl - lgl;
+      TwodVertex orig_lmask = (TwodVertex(1) << orig_lgl) - 1;
+#else
       LocalVertex lmask = (LocalVertex(1) << orig_lgl) - 1;
+#endif
       int64_t cshifted = src_ * mpi.size_2dr;
       int64_t levelshifted = int64_t(this_->current_level_) << 48;
       int64_t* buffer = buffer_;
@@ -2684,11 +3106,23 @@ class BfsBase {
       int64_t* pred = this_->pred_;
       for (int i = 0; i < length; ++i) {
         int64_t v = buffer[i];
+#ifdef SMALL_REORDER_BIT
+        int64_t pred_dst = v >> orig_lgl;
+        int64_t tgt_local = v & orig_lmask;
+
+        int64_t dst_r = (pred_dst >> group_bits) & r_mask;
+        int64_t dst_id =
+            ((pred_dst & ((uint64_t(1) << group_bits) - 1)) << lgl) |
+            (pred_dst >> (group_bits + r_bits));
+
+        int64_t pred_v = (dst_id * P + cshifted + dst_r) | levelshifted;
+#else
         int64_t pred_dst = v >> orig_lgl;
         LocalVertex tgt_local = v & lmask;
         int64_t pred_v =
             ((pred_dst >> r_bits) * P + cshifted + (pred_dst & r_mask)) |
             levelshifted;
+#endif
         assert(this_->pred_[tgt_local] == -1);
         pred[tgt_local] = pred_v;
       }

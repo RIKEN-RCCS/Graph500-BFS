@@ -221,7 +221,7 @@ class BfsOnGPU : public BfsBase<Pack48bit, LocalVertsIndex, BfsOnGPU_Params> {
 
     const int log_size = get_msb_index(mpi.size_2d);
     const int size_mask = mpi.size_2d - 1;
-#define VERTEX_OWNER(v) ((v)&size_mask)
+#define VERTEX_OWNER(v) ((v) & size_mask)
 #define VERTEX_LOCAL(v) ((v) >> log_size)
 
     // threshold of scheduling for extracting CQ. (for read graph from CPU)
@@ -458,7 +458,7 @@ class BfsOnGPU : public BfsBase<Pack48bit, LocalVertsIndex, BfsOnGPU_Params> {
 
   struct CuCreateCQList : public CudaCommand {
     CuCreateCQList(ThisType* this__) : this_(this__) {}
-    virtual void send(cudaStream_t stream){};
+    virtual void send(cudaStream_t stream) {};
     virtual void launch_kernel(cudaStream_t stream) {
 #if VERVOSE_MODE
       double start_time = MPI_Wtime();

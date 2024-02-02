@@ -158,7 +158,11 @@
 typedef uint8_t SortIdx;
 typedef uint64_t BitmapType;
 typedef uint64_t TwodVertex;
+#ifdef SMALL_REORDER_BIT
+typedef uint16_t LocalVertex;
+#else
 typedef uint32_t LocalVertex;
+#endif
 
 #ifdef __cplusplus
 namespace PRM {  //
@@ -203,6 +207,11 @@ enum {
   BOTTOM_UP_PRED_TAG = 2,
   MY_EXPAND_TAG1 = 3,
   MY_EXPAND_TAG2 = 4,
+
+#ifdef SMALL_REORDER_BIT
+  LOG_REORDER_UNIT = 12,
+  REORDER_UNIT = LocalVertex(1) << LOG_REORDER_UNIT,
+#endif
 };
 
 #ifdef __cplusplus

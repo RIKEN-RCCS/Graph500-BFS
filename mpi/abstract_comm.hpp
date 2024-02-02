@@ -104,14 +104,12 @@ class AsyncAlltoallManager {
       int offset = __sync_fetch_and_add(&node.reserved_size_, length);
       if (offset > buffer_size_) {
         // wait
-        while (node.reserved_size_ > buffer_size_)
-          ;
+        while (node.reserved_size_ > buffer_size_);
         continue;
       } else if (offset + length > buffer_size_) {
         // swap buffer
         assert(offset > 0);
-        while (offset != node.filled_size_)
-          ;
+        while (offset != node.filled_size_);
         flush(node);
         node.cur_buf.ptr = get_send_buffer();  // Maybe, this takes much time.
         // This order is important.
@@ -135,7 +133,8 @@ class AsyncAlltoallManager {
     pthread_mutex_unlock(&node.send_mutex);
   }
 
-  void run_with_ptr() {
+  template <typename VertexConverter>
+  void run_with_ptr(VertexConverter converter) {
     PROF(profiling::TimeKeeper tk_all);
     int es = buffer_provider_->element_size();
     size_t max_size = buffer_provider_->max_size() / (es * comm_size_);
@@ -203,7 +202,11 @@ class AsyncAlltoallManager {
           }
           for (int b = 0; b < (int)node.send_ptr.size(); ++b) {
             PointerData& buffer = node.send_ptr[b];
+#ifdef SMALL_REORDER_BIT
+            uint32_t* ptr = (uint32_t*)buffer.ptr;
+#else
             int64_t* ptr = (int64_t*)buffer.ptr;
+#endif
             int length = buffer.length;
             if (length == 0) continue;
 
@@ -220,7 +223,11 @@ class AsyncAlltoallManager {
             dst_ptr[2] = length;
             dst_ptr += 3;
             for (int i = 0; i < length; ++i) {
-              dst_ptr[i] = ptr[i] & 0x7FFFFFFF;
+#ifdef SMALL_REORDER_BIT
+              dst_ptr[i] = converter(ptr[i]);
+#else
+              dst_ptr[i] = converter(ptr[i]);
+#endif
             }
             offset += 3 + length;
 
@@ -231,7 +238,7 @@ class AsyncAlltoallManager {
           }
           node.send_data.clear();
         }  // #pragma omp for schedule(static)
-      }    // #pragma omp parallel
+      }  // #pragma omp parallel
       USER_END(a2a_merge);
 
       void* sendbuf = buffer_provider_->second_buffer();
@@ -315,7 +322,7 @@ class AsyncAlltoallManager {
         }
         node.send_data.clear();
       }  // #pragma omp for schedule(static)
-    }    // #pragma omp parallel
+    }  // #pragma omp parallel
     USER_END(a2a_merge);
 
     void* sendbuf = buffer_provider_->second_buffer();
@@ -369,7 +376,7 @@ class AsyncAlltoallManager {
     // lock topology
     // FoldNode::send_mutex -> thread_sync_
     pthread_mutex_t thread_sync_;
-  } * d_;
+  }* d_;
 
   MPI_Comm comm_;
 

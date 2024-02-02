@@ -903,7 +903,7 @@ class BfsValidation {
                   vertex_local(tgt);
             }
           }  // #pragma omp for schedule(static)
-        }    // #pragma omp parallel
+        }  // #pragma omp parallel
 
         MPI_Aint* restrict recv_valid_indices_r =
             scatter_r.scatter(remote_valid_indices_r);

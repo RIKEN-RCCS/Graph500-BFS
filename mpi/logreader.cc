@@ -29,18 +29,18 @@
   (__GNUC__ * 10000 + __GNUC_MINOR__ * 100 + __GNUC_PATCHLEVEL__)
 #if GCC_VERSION < 40200
 inline uint32_t __builtin_bswap32(uint32_t val) {
-  return ((((val)&0xff000000u) >> 24) | (((val)&0x00ff0000u) >> 8) |
-          (((val)&0x0000ff00u) << 8) | (((val)&0x000000ffu) << 24));
+  return ((((val) & 0xff000000u) >> 24) | (((val) & 0x00ff0000u) >> 8) |
+          (((val) & 0x0000ff00u) << 8) | (((val) & 0x000000ffu) << 24));
 }
 inline uint64_t __builtin_bswap64(uint64_t val) {
-  return ((((val)&0xff00000000000000ul) >> 56) |
-          (((val)&0x00ff000000000000ul) >> 40) |
-          (((val)&0x0000ff0000000000ul) >> 24) |
-          (((val)&0x000000ff00000000ul) >> 8) |
-          (((val)&0x00000000ff000000ul) << 8) |
-          (((val)&0x0000000000ff0000ul) << 24) |
-          (((val)&0x000000000000ff00ul) << 40) |
-          (((val)&0x00000000000000fful) << 56));
+  return ((((val) & 0xff00000000000000ul) >> 56) |
+          (((val) & 0x00ff000000000000ul) >> 40) |
+          (((val) & 0x0000ff0000000000ul) >> 24) |
+          (((val) & 0x000000ff00000000ul) >> 8) |
+          (((val) & 0x00000000ff000000ul) << 8) |
+          (((val) & 0x0000000000ff0000ul) << 24) |
+          (((val) & 0x000000000000ff00ul) << 40) |
+          (((val) & 0x00000000000000fful) << 56));
 }
 #endif
 

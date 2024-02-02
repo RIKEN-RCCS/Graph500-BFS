@@ -1065,8 +1065,7 @@ bool detect_core_affinity(std::vector<int>& cpu_set) {
 #endif  // #if SGI_OMPLACE_BUG
 
 #pragma omp parallel num_threads(num_omp_threads) \
-    reduction(|                                   \
-              : core_affinity, process_affinity)
+    reduction(| : core_affinity, process_affinity)
   {
     thread_id = omp_get_thread_num();
     cpu_set_t set;
@@ -2244,7 +2243,7 @@ void scatter(const Mapping mapping, int data_count, MPI_Comm comm) {
     for (int i = 0; i < data_count; ++i) {
       partitioned_data[(offsets[mapping.target(i)])++] = mapping.get(i);
     }  // #pragma omp for schedule(static)
-  }    // #pragma omp parallel
+  }  // #pragma omp parallel
 
   typename Mapping::send_type* recv_data = scatter.scatter(partitioned_data);
   int recv_count = scatter.get_recv_count();
@@ -2300,7 +2299,7 @@ void gather(const Mapping mapping, int data_count, MPI_Comm comm) {
       partitioned_data[pos] = mapping.get(i);
       //// user defined ////
     }  // #pragma omp for schedule(static)
-  }    // #pragma omp parallel
+  }  // #pragma omp parallel
 
   // send and receive requests
   typename Mapping::send_type* restrict reply_verts =
@@ -3245,8 +3244,7 @@ struct SpinBarrier {
       __sync_add_and_fetch(&step, 1);
       return;
     }
-    while (step == cur_step)
-      ;
+    while (step == cur_step);
   }
 };
 

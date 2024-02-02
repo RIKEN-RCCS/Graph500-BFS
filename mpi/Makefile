@@ -22,6 +22,13 @@ FUGAKU_POWER_CFLAGS=-D_FUGAKU_POWER_MEASUREMENT
 FUGAKU_POWER_CLINK=-lpwr
 endif
 
+# use small bit for reordering instead of whole vertex bit
+SMALL_REORDER_BIT = false
+ifeq ($(SMALL_REORDER_BIT), true)
+SMALL_REORDER_BIT_OPT = -DSMALL_REORDER_BIT
+else
+SMALL_REORDER_BIT_OPT =
+endif
 
 GCC_BASE := -fopenmp -g -Wall -Drestrict=__restrict__ -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS -D__STDC_FORMAT_MACROS -ffast-math $(VERBOSE_OPT) $(VERTEX_REORDERING_OPT) 
 #GCC_BASE := -g -Wall -Drestrict=__restrict__ -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS -D__STDC_FORMAT_MACROS -ffast-math -msse4.2 # -pg
@@ -41,7 +48,7 @@ CUOBJ := cuda_kernel.o
 LIBS := -lm
 
 ifeq ($(SW), GNU3)
-CFLAGS := $(GCC_BASE) -O3 -DNDEBUG -DPROFILE_REGIONS
+CFLAGS := $(GCC_BASE) -O3 -DNDEBUG -DPROFILE_REGIONS $(SMALL_REORDER_BIT_OPT)
 NVCCFLAGS := $(NVFLAG_BASE) -g -O3 -DNDEBUG -keep
 LIBS := $(LIBS) -lnuma
 endif
@@ -49,13 +56,13 @@ ifeq ($(SW), FUGAKU)
 MPICC := mpifccpx
 MPICPP := mpiFCCpx
 FCC_BASE := -Nclang -fopenmp -Drestrict=__restrict__  $(VERBOSE_OPT) $(VERTEX_REORDERING_OPT)
-CFLAGS := $(FCC_BASE) -Ofast -D__FUJITSU -DNDEBUG -DPROFILE_REGIONS $(FUGAKU_POWER_CFLAGS)
+CFLAGS := $(FCC_BASE) -Ofast -D__FUJITSU -DNDEBUG -DPROFILE_REGIONS $(FUGAKU_POWER_CFLAGS) $(SMALL_REORDER_BIT_OPT)
 LDFLAGS := $(CFLAGS) $(FUGAKU_POWER_CLINK)
 endif
 ifeq ($(SW), INTEL3)
 MPICC := mpiicc
 MPICPP := mpiicpc
-CFLAGS := -ipo -no-prec-div -qopenmp -g3 -Drestrict=__restrict__ -O3 -DNDEBUG $(VERBOSE_OPT) $(VERTEX_REORDERING_OPT)
+CFLAGS := -ipo -no-prec-div -qopenmp -g3 -Drestrict=__restrict__ -O3 -DNDEBUG $(VERBOSE_OPT) $(VERTEX_REORDERING_OPT) $(SMALL_REORDER_BIT_OPT)
 NVCCFLAGS := $(NVFLAG_BASE) -g -O3 -DNDEBUG -keep
 LDFLAGS := -qopenmp -g
 LIBS := $(LIBS) -lnuma -lmpi

@@ -655,6 +655,10 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
     fprintf(stdout, "alpha:                          %f\n", alpha);
     fprintf(stdout, "beta:                           %f\n", beta);
     fprintf(stdout, "NBFS:                           %d\n", num_bfs_roots);
+#ifdef SMALL_REORDER_BIT
+    fprintf(stdout, "Reorder bits:                   %d\n",
+            PRM::LOG_REORDER_UNIT);
+#endif
     fprintf(stdout, "graph_generation:               %g\n", generation_time);
     fprintf(stdout, "num_mpi_processes:              %d\n", mpi.size_2d);
     fprintf(stdout, "construction_time:              %g\n", construction_time);

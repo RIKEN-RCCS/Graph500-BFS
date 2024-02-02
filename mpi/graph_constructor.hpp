@@ -28,6 +28,54 @@ int inline edge_owner(int64_t v0, int64_t v1) {
 int inline vertex_owner(int64_t v) { return v % mpi.size_2d; }
 int64_t inline vertex_local(int64_t v) { return v / mpi.size_2d; }
 
+#ifdef SMALL_REORDER_BIT
+uint32_t inline reorder_get_group_id_from_local_id(const int64_t v,
+                                                   const int local_bits) {
+  return v >> local_bits;
+}
+uint32_t inline reorder_get_reorder_id_from_local_id(const int64_t v,
+                                                     const int local_bits) {
+  int64_t local_mask = ((int64_t(1) << local_bits) - 1);
+  return v & local_mask;
+}
+uint32_t inline reorder_get_group_offset_from_local_id(const int64_t v,
+                                                       const int local_bits) {
+  uint64_t local_mask = ((int64_t(1) << local_bits) - 1);
+  return v & (~local_mask);
+}
+
+// edge array's element contains:
+//    |orig_id |  R   |reorder_id|
+//      lgl    :r_bits:orig_local_bits
+uint32_t inline reorder_get_reorder_id_from_edge(
+    const int64_t v, const uint32_t orig_local_mask) {
+  return v & orig_local_mask;
+}
+uint32_t inline reorder_get_r_id_from_edge(const int64_t v, const int r_mask,
+                                           const int orig_local_bits) {
+  return (v >> orig_local_bits) & r_mask;
+}
+
+/**
+   EdgeArray contains following:
+     |original id(only uncommon part)|R rank|reorder id with group id|
+
+   original id has 26 bits with scale 43 and 158976 nodes but moving higher bits
+ to reorder bits. R rank has 10 bits at most with 158976  nodes. reorder id has
+ PRM::LOG_REORDER_UNIT bits + group bits(orig_lgl_bits - lgl_bits).
+ **/
+struct EdgeArray {
+  uint32_t* low_ptr;
+  uint16_t* high_ptr;
+
+  EdgeArray() : low_ptr(NULL), high_ptr(NULL) {}
+
+  uint64_t operator[](int64_t idx) const {
+    return (uint64_t(high_ptr[idx]) << 32) | uint64_t(low_ptr[idx]);
+  }
+};
+#endif
+
 class Graph2DCSR {
   enum { LOG_NBPE = PRM::LOG_NBPE, NBPE_MASK = PRM::NBPE_MASK };
 
@@ -39,14 +87,23 @@ class Graph2DCSR {
         reorder_map_(NULL),
         degree_(NULL),
         orig_vertexes_(NULL),
+#ifdef SMALL_REORDER_BIT
+        edge_array_(),
+#else
         edge_array_(NULL),
+#endif
         row_starts_(NULL),
+#ifdef SMALL_REORDER_BIT
+        isolated_edges_(),
+#else
         isolated_edges_(NULL),
+#endif
         log_orig_global_verts_(0),
         log_max_weight_(0),
         max_weight_(0),
         num_global_edges_(0),
-        num_global_verts_(0) {}
+        num_global_verts_(0) {
+  }
   ~Graph2DCSR() { clean(); }
 
   void clean() {
@@ -64,12 +121,26 @@ class Graph2DCSR {
     orig_vertexes_ = NULL;
     free(has_edge_bitmap_);
     has_edge_bitmap_ = NULL;
+#ifdef SMALL_REORDER_BIT
+    free(edge_array_.high_ptr);
+    free(edge_array_.low_ptr);
+    edge_array_.high_ptr = NULL;
+    edge_array_.low_ptr = NULL;
+#else
     free(edge_array_);
     edge_array_ = NULL;
+#endif
     free(row_starts_);
     row_starts_ = NULL;
+#ifdef SMALL_REORDER_BIT
+    free(isolated_edges_.high_ptr);
+    free(isolated_edges_.low_ptr);
+    isolated_edges_.high_ptr = NULL;
+    isolated_edges_.low_ptr = NULL;
+#else
     free(isolated_edges_);
     isolated_edges_ = NULL;
+#endif
   }
 
   int pred_size() { return num_orig_local_verts_; }
@@ -109,12 +180,59 @@ class Graph2DCSR {
     return e & ((1 << log_max_weight_) - 1);
   }
 
+#ifdef SMALL_REORDER_BIT
+  /// reorder id converter
+  // convert local id to bit idx
+  // this is used for row_bitmap, visit_map and etc.
+  int64_t local_id_to_bit_id(const int64_t local_id) const {
+    const int64_t orig_id_mask = ((int64_t(1) << this->orig_local_bits_) - 1);
+    const int reorder_id_mask = ((int(1) << PRM::LOG_REORDER_UNIT) - 1);
+
+    const int64_t group_id = (local_id & orig_id_mask) >> PRM::LOG_REORDER_UNIT;
+    const int reorder_id = local_id & reorder_id_mask;
+
+    return (group_id * this->num_group_verts_ + reorder_id);
+  }
+
+  // convert to local id from bit_id
+  // because bit_id is based by num_group_verts_ but local_id is based by
+  // PRM::REORDER_UNIT
+  int64_t bit_id_to_local_id(const int64_t bit_id) const {
+    const int64_t group_id = bit_id / num_group_verts_;
+    const int64_t group_offset = group_id << local_bits_;
+
+    const int reorder_id = bit_id % num_group_verts_;
+
+    return group_offset + reorder_id;
+  }
+#endif
+
   bool has_edge(int64_t v, bool has_weight = false) const {
     if (vertex_owner(v) == mpi.rank_2d) {
+#ifdef SMALL_REORDER_BIT
+      int64_t local_v = vertex_local(v);
+      LocalVertex reorder_id = reorder_map_[local_v];
+      if (reorder_id >= num_group_verts_) return false;
+
+      int64_t group_id = local_v / PRM::REORDER_UNIT;
+      if ( group_id >= num_groups_ ) return false;
+      int64_t group_offset = group_id * PRM::REORDER_UNIT;
+      int64_t v_local = group_offset + reorder_id;
+#else
       int64_t v_local = reorder_map_[v / mpi.size_2d];
       if (v_local > num_local_verts_) return false;
+#endif
+
+#ifdef SMALL_REORDER_BIT
+      int64_t bit_id = local_id_to_bit_id(v_local);
+
+      int64_t word_idx = bit_id >> LOG_NBPE;
+      int bit_idx = bit_id & NBPE_MASK;
+#else
       int64_t word_idx = v_local >> LOG_NBPE;
       int bit_idx = v_local & NBPE_MASK;
+#endif
+
       return has_edge_bitmap_[word_idx] & (BitmapType(1) << bit_idx);
     }
     return false;
@@ -137,9 +255,15 @@ class Graph2DCSR {
   LocalVertex* invert_map_;     // Index: Reordered Pred
   LocalVertex* orig_vertexes_;  // Index: CSI
 
+#ifdef SMALL_REORDER_BIT
+  EdgeArray edge_array_;
+  int64_t* row_starts_;       // Index: CSI
+  EdgeArray isolated_edges_;  // Index: CSI
+#else
   int64_t* edge_array_;
   int64_t* row_starts_;      // Index: CSI
   int64_t* isolated_edges_;  // Index: CSI
+#endif
 
   int log_orig_global_verts_;  // estimated SCALE parameter
   int log_max_weight_;
@@ -153,6 +277,10 @@ class Graph2DCSR {
   int orig_local_bits_;  // local bits for original vertex id
   int r_bits_;
   int64_t num_local_verts_;  // number of local vertices for computation
+#ifdef SMALL_REORDER_BIT
+  int64_t num_groups_;       // maximum number of groups
+  int32_t num_group_verts_;  // maximum number of local vertices in each group
+#endif
 };
 
 namespace detail {
@@ -175,6 +303,10 @@ enum {
 
 struct GraphConstructionData {
   int64_t num_local_verts_;
+#ifdef SMALL_REORDER_BIT
+  int64_t num_groups_;
+  int32_t num_group_verts_;
+#endif
 
   LocalVertex* reorder_map_;
   int64_t* degree_;
@@ -215,6 +347,10 @@ struct DegreeCalculation {
   int* num_vertexes_;
 
   int64_t max_local_verts_;
+#ifdef SMALL_REORDER_BIT
+  int32_t max_local_group_verts_;
+  int64_t max_local_groups_;
+#endif
 
   int num_rows_;
   int num_iters_;
@@ -372,6 +508,11 @@ struct DegreeCalculation {
     int64_t num_verts = num_orig_local_verts();
     vertexes_ = static_cast<LocalVertex*>(
         cache_aligned_xcalloc(num_verts * sizeof(LocalVertex)));
+#ifdef SMALL_REORDER_BIT
+    const int64_t LOG_REORDER_UNIT = PRM::LOG_REORDER_UNIT;
+    const int64_t REORDER_UNIT = PRM::REORDER_UNIT;
+    const int32_t mask_reorder = REORDER_UNIT - 1;
+#endif
 
 #pragma omp parallel for
     for (int r = 0; r < num_rows_; ++r) {
@@ -387,17 +528,66 @@ struct DegreeCalculation {
       }
     }
 
+#if SMALL_REORDER_BIT
+    for (int64_t i = 0; i < num_verts; ++i) {
+      int32_t local_reordered_id = (i & mask_reorder);
+      vertexes_[i] = local_reordered_id;
+    }
+#else
     for (LocalVertex i = 0; i < num_verts; ++i) {
       vertexes_[i] = i;
     }
+#endif
 
+#if SMALL_REORDER_BIT
+
+#pragma omp parallel for
+    for (int64_t i = 0;
+         i < std::max((num_verts >> LOG_REORDER_UNIT), int64_t(1)); ++i) {
+      const int64_t begin_offset = i * REORDER_UNIT;
+      const int64_t num_sorting = std::min(REORDER_UNIT, num_verts - i);
+
+#if VERTEX_REORDERING == 2
+      sort2(degree + begin_offset, vertexes_ + begin_offset, num_sorting,
+            std::greater<int64_t>());
+#elif VERTEX_REORDERING == 1
+      sort2(degree + begin_offset, vertexes_ + begin_offest, num_sorting,
+            ZeroOrElseComparator<int64_t>());
+#endif
+    }
+#else
     // sort by degree
 #if VERTEX_REORDERING == 2
     sort2(degree, vertexes_, num_verts, std::greater<int64_t>());
 #elif VERTEX_REORDERING == 1
     sort2(degree, vertexes_, num_verts, ZeroOrElseComparator<int64_t>());
 #endif
+#endif
 
+#if SMALL_REORDER_BIT
+    max_local_group_verts_ = 0;
+    max_local_groups_ = 0;
+#pragma omp parallel for reduction(max : max_local_group_verts_, \
+                                       max_local_groups_)
+    for (int64_t i = 0; i < num_verts; i += REORDER_UNIT) {
+      int64_t num_loop = std::min(REORDER_UNIT, num_verts - i);
+      int32_t group_max_verts = 0;
+      for (int32_t j = num_loop - 1; j >= 0; --j) {
+        if (degree[i + j] != 0) {
+          group_max_verts = j + 1;
+          break;
+        }
+      }
+
+      if (group_max_verts > 0)
+        max_local_groups_ =
+            std::max(max_local_groups_, (i >> LOG_REORDER_UNIT) + 1);
+
+      max_local_group_verts_ =
+          std::max(max_local_group_verts_, group_max_verts);
+    }
+
+#else
     max_local_verts_ = 0;
     for (int64_t i = num_verts - 1; i >= 0; --i) {
       if (degree[i] != 0) {
@@ -405,12 +595,36 @@ struct DegreeCalculation {
         break;
       }
     }
+#endif
+
+#if SMALL_REORDER_BIT
+    // roundup
+    int64_t local_verts_unit = int64_t(1) << log_local_verts_unit_;
+    max_local_verts_ =
+        roundup(max_local_group_verts_ * max_local_groups_, local_verts_unit);
+    // print_with_prefix("[dump] max_local_verts %d, max_local_groups = %d",
+    // max_local_verts_, max_local_groups_);
+
+    // get global max
+    MPI_Allreduce(MPI_IN_PLACE, &max_local_verts_, 1, MpiTypeOf<int64_t>::type,
+                  MPI_MAX, mpi.comm_2d);
+    MPI_Allreduce(MPI_IN_PLACE, &max_local_group_verts_, 1,
+                  MpiTypeOf<int32_t>::type, MPI_MAX, mpi.comm_2d);
+
+    if (mpi.isMaster())
+      print_with_prefix(
+          "max_local_verts = %lld, max_local_group_verts = %u, "
+          "local_verts_unit = %lld",
+          max_local_verts_, max_local_group_verts_, local_verts_unit);
+
+#else
     // roundup
     int64_t local_verts_unit = int64_t(1) << log_local_verts_unit_;
     max_local_verts_ = roundup(max_local_verts_, local_verts_unit);
     // get global max
     MPI_Allreduce(MPI_IN_PLACE, &max_local_verts_, 1, MpiTypeOf<int64_t>::type,
                   MPI_MAX, mpi.comm_2d);
+#endif
     if (mpi.isMaster())
       print_with_prefix("Max local vertex %f M / %f M = %f %%",
                         to_mega(max_local_verts_), to_mega(num_verts),
@@ -419,10 +633,21 @@ struct DegreeCalculation {
     // store mapping to degree
     LocalVertex* reorder_map = static_cast<LocalVertex*>(
         cache_aligned_xcalloc(num_verts * sizeof(LocalVertex)));
+#if SMALL_REORDER_BIT
+#pragma omp parallel for
+    for (int64_t i = 0; i < num_verts; ++i) {
+      int64_t reordered_group_id = (i >> LOG_REORDER_UNIT) * REORDER_UNIT;
+      int32_t local_reordered_id = (i & mask_reorder);
+
+      reorder_map[reordered_group_id + vertexes_[i]] =
+          LocalVertex(local_reordered_id);
+    }
+#else
 #pragma omp parallel for
     for (int64_t i = 0; i < num_verts; ++i) {
       reorder_map[vertexes_[i]] = int(i);
     }
+#endif
 
     return reorder_map;
   }
@@ -430,6 +655,9 @@ struct DegreeCalculation {
   void make_construct_data(LocalVertex* reorder_map) {
     int64_t src_bitmap_size = local_bitmap_size() * mpi.size_2dc;
     int64_t num_wide_rows = local_wide_row_size() * mpi.size_2dc;
+#ifdef SMALL_REORDER_BIT
+    const int64_t LOG_REORDER_UNIT = PRM::LOG_REORDER_UNIT;
+#endif
 
     // allocate 1
     row_bitmap_ = static_cast<BitmapType*>(
@@ -452,7 +680,16 @@ struct DegreeCalculation {
           for (DWideRowEdge* d = row_data_start; d < row_data_end; ++d) {
             int c = d->c;
             TwodVertex local = r * BLOCK_SIZE + d->src_vertex;
+#if SMALL_REORDER_BIT
+            TwodVertex reordered =
+                (local >> LOG_REORDER_UNIT) * max_local_group_verts_ +
+                reorder_map[local];
+#ifndef NDEBUG
+            assert(reoder_map[local] < max_local_group_verts_);
+#endif
+#else
             LocalVertex reordered = reorder_map[local];
+#endif
 
             int64_t wide_row_offset =
                 local_wide_row_size() * c + (reordered >> LOG_EDGE_PART_SIZE);
@@ -542,7 +779,19 @@ struct DegreeCalculation {
           if (row_bitmap_[word_idx] & mask) {
             BitmapType word = row_bitmap_[word_idx] & (mask - 1);
             TwodVertex offset = __builtin_popcountl(word) + row_sums_[word_idx];
+
+#ifdef SMALL_REORDER_BIT
+            const TwodVertex group_id =
+                (i * NBPE + bit_idx) / max_local_group_verts_;
+            const int16_t reorder_id =
+                (i * NBPE + bit_idx) % max_local_group_verts_;
+
+            const TwodVertex reordered =
+                group_id * PRM::REORDER_UNIT + reorder_id;
+#else
             TwodVertex reordered = i * NBPE + bit_idx;
+#endif
+
             orig_vertexes_[offset] = vertexes_[reordered];
           }
         }
@@ -557,6 +806,10 @@ struct DegreeCalculation {
     int64_t src_bitmap_size = local_bitmap_size() * mpi.size_2dc;
 
     data.num_local_verts_ = max_local_verts_;
+#ifdef SMALL_REORDER_BIT
+    data.num_groups_ = max_local_groups_;
+    data.num_group_verts_ = max_local_group_verts_;
+#endif
     data.reorder_map_ = reorder_map;
     data.degree_ = degree;
     data.invert_map_ = vertexes_;
@@ -748,7 +1001,13 @@ class GraphConstructor2DCSR {
     g.degree_ = data.degree_;
     g.invert_map_ = data.invert_map_;
     g.num_local_verts_ = data.num_local_verts_;
+#ifdef SMALL_REORDER_BIT
+    g.num_groups_ = data.num_groups_;
+    g.num_group_verts_ = data.num_group_verts_;
+    local_bits_ = g.local_bits_ = PRM::LOG_REORDER_UNIT;
+#else
     local_bits_ = g.local_bits_ = get_msb_index(g.num_local_verts_ - 1) + 1;
+#endif
     g.r_bits_ = (mpi.size_2dr == 1) ? 0 : (get_msb_index(mpi.size_2dr - 1) + 1);
     num_wide_rows_ = g.num_local_verts_ * mpi.size_2dc / EDGE_PART_SIZE;
     wide_row_starts_ = data.wide_row_starts_;
@@ -899,7 +1158,7 @@ class GraphConstructor2DCSR {
           (counts[vertex_owner(v0)])++;
           (counts[vertex_owner(v1)])++;
         }  // #pragma omp for schedule(static)
-      }    // #pragma omp parallel
+      }  // #pragma omp parallel
 
       scatter.sum();
 
@@ -931,7 +1190,7 @@ class GraphConstructor2DCSR {
           // assert (offsets[edge_owner(v1,v0)] < 2 * FILE_CHUNKSIZE);
           edges_to_send[(offsets[vertex_owner(v1)])++] = v1_swizzled.value;
         }  // #pragma omp for schedule(static)
-      }    // #pragma omp parallel
+      }  // #pragma omp parallel
 
 #if NETWORK_PROBLEM_AYALISYS
       if (mpi.isMaster()) print_with_prefix("MPI_Alltoall...");
@@ -962,14 +1221,27 @@ class GraphConstructor2DCSR {
     const int64_t local_bitmap_width = num_local_verts / NBPE;
     const int64_t row_bitmap_length = local_bitmap_width * mpi.size_2dc;
     const int64_t non_zero_rows = g.row_sums_[row_bitmap_length];
+#ifdef SMALL_REORDER_BIT
+    g.isolated_edges_.high_ptr = static_cast<uint16_t*>(
+        cache_aligned_xmalloc(non_zero_rows * sizeof(uint16_t)));
+    g.isolated_edges_.low_ptr = static_cast<uint32_t*>(
+        cache_aligned_xmalloc(non_zero_rows * sizeof(uint32_t)));
+#else
     g.isolated_edges_ = static_cast<int64_t*>(
         cache_aligned_xmalloc(non_zero_rows * sizeof(g.isolated_edges_[0])));
+#endif
 
     if (mpi.isMaster()) print_with_prefix("Isolating first edges.");
     for (int64_t non_zero_idx = 0; non_zero_idx < non_zero_rows;
          ++non_zero_idx) {
       int64_t e_start = g.row_starts_[non_zero_idx];
+#ifdef SMALL_REORDER_BIT
+      g.isolated_edges_.high_ptr[non_zero_idx] =
+          g.edge_array_.high_ptr[e_start];
+      g.isolated_edges_.low_ptr[non_zero_idx] = g.edge_array_.low_ptr[e_start];
+#else
       g.isolated_edges_[non_zero_idx] = g.edge_array_[e_start];
+#endif
     }
     MPI_Barrier(mpi.comm_2d);
 
@@ -980,18 +1252,41 @@ class GraphConstructor2DCSR {
       int64_t e_start = g.row_starts_[non_zero_idx];
       int64_t e_end = g.row_starts_[non_zero_idx + 1];
       int64_t e_length = e_end - e_start;
+
+#ifdef SMALL_REORDER_BIT
+      memmove(g.edge_array_.high_ptr + e_start - non_zero_idx,
+              g.edge_array_.high_ptr + e_start + 1,
+              sizeof(uint16_t) * (e_length - 1));
+      memmove(g.edge_array_.low_ptr + e_start - non_zero_idx,
+              g.edge_array_.low_ptr + e_start + 1,
+              sizeof(uint32_t) * (e_length - 1));
+#else
       memmove(g.edge_array_ + e_start - non_zero_idx,
               g.edge_array_ + e_start + 1, sizeof(int64_t) * (e_length - 1));
+#endif
       g.row_starts_[non_zero_idx] -= non_zero_idx;
     }
 
     // update the last entry of row_starts_ and compact the edge array memory
     g.row_starts_[non_zero_rows] -= non_zero_rows;
+#ifdef SMALL_REORDER_BIT
+    g.edge_array_.high_ptr = static_cast<uint16_t*>(
+        realloc(g.edge_array_.high_ptr,
+                g.row_starts_[non_zero_rows] * sizeof(uint16_t)));
+    g.edge_array_.low_ptr = static_cast<uint32_t*>(
+        realloc(g.edge_array_.low_ptr,
+                g.row_starts_[non_zero_rows] * sizeof(uint32_t)));
+    if (g.row_starts_[non_zero_rows] != 0 &&
+        (g.edge_array_.high_ptr == NULL || g.edge_array_.low_ptr == NULL)) {
+      throw_exception("Out of memory trying to re-allocate edge array");
+    }
+#else
     g.edge_array_ = static_cast<int64_t*>(
         realloc(g.edge_array_, g.row_starts_[non_zero_rows] * sizeof(int64_t)));
     if (g.row_starts_[non_zero_rows] != 0 && g.edge_array_ == NULL) {
       throw_exception("Out of memory trying to re-allocate edge array");
     }
+#endif
 
     if (mpi.isMaster()) print_with_prefix("Finished compacting edge array.");
   }
@@ -1231,7 +1526,11 @@ class GraphConstructor2DCSR {
   void addEdges(int64_t* src_converted, int64_t* tgt_converted, int num_edges,
                 GraphType& g) {
     const int64_t L = g.num_local_verts_;
+#ifdef SMALL_REORDER_BIT
+    const int lgl = org_local_bits_;
+#else
     const int lgl = local_bits_;
+#endif
     ParallelPartitioning<int64_t> row_length_counter(num_wide_rows_);
 
 #pragma omp parallel
@@ -1259,6 +1558,7 @@ class GraphConstructor2DCSR {
 
         const int src_high = v0.compact(lgl, L) >> LOG_EDGE_PART_SIZE;
         const uint16_t src_low = v0.compact(lgl, L) & EDGE_PART_SIZE_MASK;
+
         const int64_t pos = offsets[src_high]++;
 
         // random access (write)
@@ -1266,7 +1566,12 @@ class GraphConstructor2DCSR {
         assert(g.edge_array_[pos] == 0);
 #endif
         src_vertexes_[pos] = src_low;
+#ifdef SMALL_REORDER_BIT
+        g.edge_array_.low_ptr[pos] = v1.value & 0xFFFF'FFFF;
+        g.edge_array_.high_ptr[pos] = (v1.value >> 32) & 0xFFFF;
+#else
         g.edge_array_[pos] = v1.value;
+#endif
       }
     }
   }
@@ -1277,13 +1582,23 @@ class GraphConstructor2DCSR {
     typedef TwodVertex recv_type;
 
     SourceConverter(EdgeType* edges, int64_t* converted,
-                    LocalVertex* reorder_map, int org_local_bits,
-                    int local_bits)
+                    LocalVertex* reorder_map, int org_local_bits, int local_bits
+#ifdef SMALL_REORDER_BIT
+                    ,
+                    int16_t max_local_group_verts
+#endif
+                    )
         : edges_(edges),
           reorder_map_(reorder_map),
           converted_(converted),
           org_local_bits_(org_local_bits),
-          local_bits_(local_bits) {}
+          local_bits_(local_bits)
+#ifdef SMALL_REORDER_BIT
+          ,
+          max_local_group_verts_(max_local_group_verts)
+#endif
+    {
+    }
     int target(int i) const {
       const SeparatedId v0_swizzled(edges_[i].v0());
       assert(v0_swizzled.high(org_local_bits_) < mpi.size_2dc);
@@ -1292,11 +1607,24 @@ class GraphConstructor2DCSR {
     TwodVertex get(int i) const {
       return SeparatedId(edges_[i].v0()).low(org_local_bits_);
     }
-    TwodVertex map(TwodVertex v) const { return reorder_map_[v]; }
+    TwodVertex map(TwodVertex v) const {
+#ifdef SMALL_REORDER_BIT
+      return (v >> local_bits_) * max_local_group_verts_ + reorder_map_[v];
+#else
+      return reorder_map_[v];
+#endif
+    }
     void set(int i, TwodVertex d) const {
+#ifdef SMALL_REORDER_BIT
+      SeparatedId v0_swizzled(edges_[i].v0());
+      converted_[i] =
+          SeparatedId(v0_swizzled.high(org_local_bits_), d, org_local_bits_)
+              .value;
+#else
       SeparatedId v0_swizzled(edges_[i].v0());
       converted_[i] =
           SeparatedId(v0_swizzled.high(org_local_bits_), d, local_bits_).value;
+#endif
     }
 
    private:
@@ -1305,6 +1633,9 @@ class GraphConstructor2DCSR {
     int64_t* converted_;
     const int org_local_bits_;
     const int local_bits_;
+#ifdef SMALL_REORDER_BIT
+    const int16_t max_local_group_verts_;
+#endif
   };
 
   class TargetConverter {
@@ -1314,13 +1645,24 @@ class GraphConstructor2DCSR {
 
     TargetConverter(EdgeType* edges, int64_t* converted,
                     LocalVertex* reorder_map, int org_local_bits,
-                    int local_bits, int vertex_bits)
+                    int local_bits, int vertex_bits
+#ifdef SMALL_REORDER_BIT
+                    ,
+                    int16_t max_local_group_verts
+#endif
+                    )
         : edges_(edges),
           reorder_map_(reorder_map),
           converted_(converted),
           org_local_bits_(org_local_bits),
           local_bits_(local_bits),
-          vertex_bits_(vertex_bits) {}
+          vertex_bits_(vertex_bits)
+#ifdef SMALL_REORDER_BIT
+          ,
+          max_local_group_verts_(max_local_group_verts)
+#endif
+    {
+    }
     int target(int i) const {
       const SeparatedId v1_swizzled(edges_[i].v1());
       assert(v1_swizzled.high(org_local_bits_) < mpi.size_2dr);
@@ -1331,12 +1673,27 @@ class GraphConstructor2DCSR {
     }
     TwodVertex map(TwodVertex v) const { return reorder_map_[v]; }
     void set(int i, TwodVertex d) const {
+#ifdef SMALL_REORDER_BIT
+      SeparatedId v1_swizzled(edges_[i].v1());
+
+      uint64_t local_mask = (uint64_t(1) << local_bits_) - 1;
+
+      uint64_t reorder_id = d;
+      uint64_t r_id = v1_swizzled.high(org_local_bits_);
+      uint64_t orig_id = v1_swizzled.low(org_local_bits_);
+      uint64_t group_id = orig_id >> local_bits_;
+
+      converted_[i] =
+          ((orig_id & local_mask) << vertex_bits_) | (r_id << org_local_bits_) |
+          (group_id * max_local_group_verts_ + (reorder_id & local_mask));
+#else
       SeparatedId v1_swizzled(edges_[i].v1());
       int64_t low_part =
           SeparatedId(v1_swizzled.high(org_local_bits_), d, local_bits_).value;
       converted_[i] =
           SeparatedId(v1_swizzled.low(org_local_bits_), low_part, vertex_bits_)
               .value;
+#endif
     }
 
    private:
@@ -1346,6 +1703,9 @@ class GraphConstructor2DCSR {
     const int org_local_bits_;
     const int local_bits_;
     const int vertex_bits_;
+#ifdef SMALL_REORDER_BIT
+    const int16_t max_local_group_verts_;
+#endif
   };
 
   void scatterAndStore(EdgeList* edge_list, GraphType& g) {
@@ -1354,9 +1714,16 @@ class GraphConstructor2DCSR {
     EdgeType* edges_to_send = static_cast<EdgeType*>(
         xMPI_Alloc_mem(2 * EdgeList::CHUNK_SIZE * sizeof(EdgeType)));
 
+#ifdef SMALL_REORDER_BIT
+    g.edge_array_.high_ptr = (uint16_t*)cache_aligned_xcalloc(
+        wide_row_starts_[num_wide_rows_] * sizeof(uint16_t));
+    g.edge_array_.low_ptr = (uint32_t*)cache_aligned_xcalloc(
+        wide_row_starts_[num_wide_rows_] * sizeof(uint32_t));
+#else
     // const int64_t num_local_verts = g.num_local_verts_;
     g.edge_array_ = (int64_t*)cache_aligned_xcalloc(
         wide_row_starts_[num_wide_rows_] * sizeof(int64_t));
+#endif
     src_vertexes_ = (uint16_t*)cache_aligned_xcalloc(
         wide_row_starts_[num_wide_rows_] * sizeof(uint16_t));
 
@@ -1365,6 +1732,9 @@ class GraphConstructor2DCSR {
     if (mpi.isMaster())
       print_with_prefix("Begin construction. Number of iterations is %d.",
                         num_loops);
+    if (mpi.isMaster())
+      print_with_prefix("  local_bits = %d org_local_bits = %d", local_bits_,
+                        org_local_bits_);
 
     for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
       EdgeType* edge_data;
@@ -1382,7 +1752,7 @@ class GraphConstructor2DCSR {
           (counts[edge_owner(v0, v1)])++;
           (counts[edge_owner(v1, v0)])++;
         }  // #pragma omp for schedule(static)
-      }    // #pragma omp parallel
+      }  // #pragma omp parallel
 
       scatter.sum();
 
@@ -1404,14 +1774,29 @@ class GraphConstructor2DCSR {
 
       if (mpi.isMaster()) print_with_prefix("Convert vertex id...");
 
+#ifdef SMALL_REORDER_BIT
+      MpiCol::gather(
+          SourceConverter(recv_edges, src_converted, g.reorder_map_,
+                          org_local_bits_, local_bits_, g.num_group_verts_),
+          num_recv_edges, mpi.comm_2dr);
+#else
       MpiCol::gather(SourceConverter(recv_edges, src_converted, g.reorder_map_,
                                      org_local_bits_, local_bits_),
                      num_recv_edges, mpi.comm_2dr);
+#endif
 
+#ifdef SMALL_REORDER_BIT
+      MpiCol::gather(
+          TargetConverter(recv_edges, tgt_converted, g.reorder_map_,
+                          org_local_bits_, local_bits_,
+                          g.r_bits_ + org_local_bits_, g.num_group_verts_),
+          num_recv_edges, mpi.comm_2dc);
+#else
       MpiCol::gather(TargetConverter(recv_edges, tgt_converted, g.reorder_map_,
                                      org_local_bits_, local_bits_,
                                      g.r_bits_ + local_bits_),
                      num_recv_edges, mpi.comm_2dc);
+#endif
 
       if (mpi.isMaster()) print_with_prefix("Add edges...");
       addEdges(src_converted, tgt_converted, num_recv_edges, g);
@@ -1530,18 +1915,60 @@ DECODE(sort_v); g.edge_array_.set(idx, v);
 */
   }
 
+#ifdef SMALL_REORDER_BIT
   struct SortEdgeCompair {
-    typedef pointer_pair_value<uint16_t, int64_t> Val;
-    SortEdgeCompair(int vertex_bits)
-        : edge_mask((int64_t(1) << vertex_bits) - 1) {}
-    int64_t edge_mask;
+    typedef pointer_triplet_value<uint16_t, uint16_t, uint32_t>
+        Val;  // key, high, low
+    SortEdgeCompair(int r_bits, int orig_lgl, int lgl)
+        : r_bits(r_bits), orig_lgl(orig_lgl), lgl(lgl) {}
+
+    int r_bits;
+    int orig_lgl;
+    int lgl;
 
     bool operator()(Val r1, Val r2) const {
+      // sort keys are 1: R, 2: reorder id
+
+      int orig_lgl_mask = (1 << orig_lgl) - 1;
+      int r_mask = (1 << r_bits) - 1;
+
+      uint64_t r1_to = (uint64_t(r1.v2) << 32) | uint64_t(r1.v3);
+      uint64_t r2_to = (uint64_t(r2.v2) << 32) | uint64_t(r2.v3);
+
+      uint64_t r1_R = reorder_get_r_id_from_edge(r1_to, r_mask, orig_lgl);
+      uint64_t r2_R = reorder_get_r_id_from_edge(r2_to, r_mask, orig_lgl);
+
+      uint64_t r1_reorder_id =
+          reorder_get_reorder_id_from_edge(r1_to, orig_lgl_mask);
+      uint64_t r2_reorder_id =
+          reorder_get_reorder_id_from_edge(r2_to, orig_lgl_mask);
+
+      uint64_t r1_v =
+          (uint64_t(r1.v1) << 48) | ((r1_R << orig_lgl) | r1_reorder_id);
+      uint64_t r2_v =
+          (uint64_t(r2.v1) << 48) | ((r2_R << orig_lgl) | r2_reorder_id);
+
+      return r1_v < r2_v;
+    }
+  };
+#else
+  struct SortEdgeCompair {
+    typedef pointer_pair_value<uint16_t, int64_t> Val;
+    SortEdgeCompair(int r_bits, int orig_lgl, int lgl)
+        : r_bits(r_bits), orig_lgl(orig_lgl), lgl(lgl) {}
+
+    int r_bits;
+    int orig_lgl;
+    int lgl;
+
+    bool operator()(Val r1, Val r2) const {
+      int64_t edge_mask = (int64_t(1) << (lgl + r_bits)) - 1;
       uint64_t r1_v = (uint64_t(r1.v1) << 48) | (r1.v2 & edge_mask);
       uint64_t r2_v = (uint64_t(r2.v1) << 48) | (r2.v2 & edge_mask);
       return r1_v < r2_v;
     }
   };
+#endif
 
   // function #2
   template <typename EdgeType>
@@ -1550,26 +1977,65 @@ DECODE(sort_v); g.edge_array_.set(idx, v);
     for (int64_t i = 0; i < num_wide_rows_; ++i) {
       const int64_t edge_offset = wide_row_starts_[i];
       const int64_t edge_count = wide_row_starts_[i + 1] - edge_offset;
+#ifdef SMALL_REORDER_BIT
+      int r_mask = (1 << g.r_bits_) - 1;
+      int orig_lgl_mask = (1 << g.orig_local_bits_) - 1;
+#else
       int vertex_bits = g.r_bits_ + local_bits_;
       int64_t edge_mask = (int64_t(1) << vertex_bits) - 1;
+#endif
 
       // sort
+#ifdef SMALL_REORDER_BIT
+      sort3(src_vertexes_ + edge_offset, g.edge_array_.high_ptr + edge_offset,
+            g.edge_array_.low_ptr + edge_offset, edge_count,
+            SortEdgeCompair(g.r_bits_, g.orig_local_bits_, g.local_bits_));
+#else
       sort2(src_vertexes_ + edge_offset, g.edge_array_ + edge_offset,
-            edge_count, SortEdgeCompair(vertex_bits));
+            edge_count,
+            SortEdgeCompair(g.r_bits_, g.orig_local_bits_, g.local_bits_));
+#endif
 
       // merge same edges
       int64_t idx = edge_offset;
       if (edge_count > 0) {
         // we can ignore the original vertex id
+#ifdef SMALL_REORDER_BIT
+        uint64_t edge_v = g.edge_array_[idx];
+        uint64_t reordered =
+            reorder_get_reorder_id_from_edge(edge_v, orig_lgl_mask);
+        uint64_t r_id =
+            reorder_get_r_id_from_edge(edge_v, r_mask, g.orig_local_bits_);
+
+        uint64_t prev_v = (uint64_t(src_vertexes_[idx]) << 48) |
+                          ((r_id << g.orig_local_bits_) | reordered);
+#else
         uint64_t prev_v = (uint64_t(src_vertexes_[idx]) << 48) |
                           (g.edge_array_[idx] & edge_mask);
+#endif
         ++idx;
         for (int64_t c = edge_offset + 1; c < edge_offset + edge_count; ++c) {
+#ifdef SMALL_REORDER_BIT
+          uint64_t edge_v = g.edge_array_[c];
+          uint64_t reordered =
+              reorder_get_reorder_id_from_edge(edge_v, orig_lgl_mask);
+          uint64_t r_id =
+              reorder_get_r_id_from_edge(edge_v, r_mask, g.orig_local_bits_);
+
+          const uint64_t sort_v = (uint64_t(src_vertexes_[c]) << 48) |
+                                  ((r_id << g.orig_local_bits_) | reordered);
+#else
           const uint64_t sort_v = (uint64_t(src_vertexes_[c]) << 48) |
                                   (g.edge_array_[c] & edge_mask);
+#endif
           if (prev_v != sort_v) {
             assert(prev_v < sort_v);
+#ifdef SMALL_REORDER_BIT
+            g.edge_array_.high_ptr[idx] = g.edge_array_.high_ptr[c];
+            g.edge_array_.low_ptr[idx] = g.edge_array_.low_ptr[c];
+#else
             g.edge_array_[idx] = g.edge_array_[c];
+#endif
             src_vertexes_[idx] = src_vertexes_[c];
             prev_v = sort_v;
             ++idx;
@@ -1596,8 +2062,17 @@ DECODE(sort_v); g.edge_array_.set(idx, v);
       if (rowstart_new != rowstart_old) {
         memmove(src_vertexes_ + rowstart_new, src_vertexes_ + rowstart_old,
                 edge_count_new * sizeof(src_vertexes_[0]));
+#ifdef SMALL_REORDER_BIT
+        memmove(g.edge_array_.high_ptr + rowstart_new,
+                g.edge_array_.high_ptr + rowstart_old,
+                edge_count_new * sizeof(uint16_t));
+        memmove(g.edge_array_.low_ptr + rowstart_new,
+                g.edge_array_.low_ptr + rowstart_old,
+                edge_count_new * sizeof(uint32_t));
+#else
         memmove(g.edge_array_ + rowstart_new, g.edge_array_ + rowstart_old,
                 edge_count_new * sizeof(g.edge_array_[0]));
+#endif
       }
       rowstart_new += edge_count_new;
     }

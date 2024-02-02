@@ -296,7 +296,7 @@ void redistribute_edge_2d(EdgeList* edge_list,
         // assert (offsets[edge_owner(v0,v1)] < 2 * FILE_CHUNKSIZE);
         edges_to_send[(offsets[edge_owner(v0, v1)])++].set(v0, v1, weight);
       }  // #pragma omp for schedule(static)
-    }    // #pragma omp parallel
+    }  // #pragma omp parallel
 
     if (mpi.isMaster()) print_with_prefix("Scatter edges.");
 
@@ -354,7 +354,7 @@ void redistribute_edge_2d(EdgeList* edge_list,
         // assert (offsets[edge_owner(v0,v1)] < 2 * FILE_CHUNKSIZE);
         edges_to_send[(offsets[edge_owner(v0, v1)])++].set(v0, v1);
       }  // #pragma omp for schedule(static)
-    }    // #pragma omp parallel
+    }  // #pragma omp parallel
 
     EdgeType* recv_edges = scatter.scatter(edges_to_send);
     const int64_t num_recv_edges = scatter.get_recv_count();
