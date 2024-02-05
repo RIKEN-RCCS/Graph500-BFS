@@ -3630,13 +3630,15 @@ void BfsBase::run_bfs_core(int64_t root, int64_t* pred, const int edgefactor,
 
 #if VERVOSE_MODE
     int64_t send_num_bufs[2] = {a2a_comm->get_last_send_size(),
-                                nq_empty_buffer_.size()};
+                                static_cast<int64_t>(nq_empty_buffer_.size())};
     int64_t sum_num_bufs[2], max_num_bufs[2];
     MPI_Reduce(send_num_bufs, sum_num_bufs, 2, MpiTypeOf<int64_t>::type,
                MPI_SUM, 0, MPI_COMM_WORLD);
     MPI_Reduce(send_num_bufs, max_num_bufs, 2, MpiTypeOf<int64_t>::type,
                MPI_MAX, 0, MPI_COMM_WORLD);
     if (mpi.isMaster()) {
+      int64_t global_unvisited_vertices =
+          graph_.num_global_verts_ - global_visited_vertices;
       double nq_rate = (double)global_nq_size_ / graph_.num_global_verts_;
       double nq_unvis_rate =
           (double)global_nq_size_ / global_unvisited_vertices;
