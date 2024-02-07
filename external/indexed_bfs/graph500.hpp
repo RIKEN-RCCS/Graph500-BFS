@@ -147,7 +147,7 @@ static size_t count_vertices(const std::vector<edge> &edges) {
 
 static bit::bit_vector check_connectivity(const std::vector<edge> &edges) {
   const auto n = count_vertices(edges);
-  auto vec = bit::make_bit_vector(n);
+  bit::bit_vector vec(n);
 
 #pragma omp parallel for
   for (size_t i = 0; i < edges.size(); ++i) {

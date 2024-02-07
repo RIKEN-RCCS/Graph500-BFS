@@ -153,54 +153,61 @@ template <typename Integral> bool get_bit(const Integral v, const size_t i) {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-struct bit_vector {
+class bit_vector {
+public:
   using element_type = uint64_t;
   static constexpr int element_bits = sizeof(element_type) * 8;
 
-  std::vector<std::atomic<element_type>> vec;
-  size_t bit_length;
+private:
+  std::vector<std::atomic<element_type>> vec_;
+  size_t bit_length_;
+
+public:
+  bit_vector(const size_t bit_length)
+      : vec_((bit_length + element_bits - 1) / element_bits),
+        bit_length_(bit_length) {}
 
   bool operator[](const size_t i) const {
     const auto i_elem = i / element_bits;
     const auto i_bit = i % element_bits;
-    return get_bit(vec[i_elem].load(), i_bit);
+    return get_bit(vec_[i_elem].load(), i_bit);
   }
 
-  void clear() { vec.clear(); }
+  void clear() { vec_.clear(); }
 
   size_t count() const {
     size_t n = 0;
-    for (const auto &e : vec) {
+    for (const auto &e : vec_) {
       n += popcount(e.load());
     }
     return n;
   }
 
-  void set(const size_t i) {
-    assert(i < this->bit_length);
+  const std::atomic<element_type> *data() const { return vec_.data(); }
+
+  std::atomic<element_type> *data() { return vec_.data(); }
+
+  size_t element_count() const { return vec_.size(); }
+
+  void set(const size_t i, const bool value = true) {
+    assert(i < this->bit_length_);
 
     const auto i_elem = i / element_bits;
     const auto i_bit = i % element_bits;
-    auto &e = vec[i_elem];
+    auto &e = vec_[i_elem];
 
     for (;;) {
       auto expected = e.load();
-      auto desired = with_bit(expected, i_bit);
+      auto desired =
+          value ? with_bit(expected, i_bit) : without_bit(expected, i_bit);
       if (e.compare_exchange_strong(expected, desired)) {
         break;
       }
     }
   }
 
-  size_t size() const { return bit_length; }
+  size_t size() const { return bit_length_; }
 };
-
-bit_vector make_bit_vector(const size_t bit_length) {
-  const auto element_bits = sizeof(bit_vector::element_type) * 8;
-  const auto n = (bit_length + element_bits - 1) / element_bits;
-  return bit_vector{std::vector<std::atomic<bit_vector::element_type>>(n),
-                    bit_length};
-}
 
 } // namespace detail
 
@@ -211,7 +218,6 @@ using detail::countr_one;
 using detail::countr_zero;
 using detail::get_bit;
 using detail::iterate_ones;
-using detail::make_bit_vector;
 using detail::one_iterator;
 using detail::popcount;
 using detail::with_bit;

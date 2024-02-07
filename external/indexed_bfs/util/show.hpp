@@ -27,7 +27,9 @@ namespace util {
 namespace show {
 namespace detail {
 
-template <typename T> struct shown { const T &x; };
+template <typename T> struct shown {
+  const T &x;
+};
 
 template <typename T>
 std::ostream &operator<<(std::ostream &, const util::show::detail::shown<T>);
