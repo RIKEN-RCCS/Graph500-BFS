@@ -210,8 +210,7 @@ enum {
   MY_EXPAND_TAG2 = 4,
 
 #ifdef SMALL_REORDER_BIT
-  LOG_REORDER_UNIT = 12,
-  REORDER_UNIT = LocalVertex(1) << LOG_REORDER_UNIT,
+  INITIAL_LOG_REORDER_UNIT = 12,
 #endif
 };
 
