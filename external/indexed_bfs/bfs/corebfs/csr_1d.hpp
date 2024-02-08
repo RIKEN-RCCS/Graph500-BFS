@@ -19,7 +19,7 @@ using namespace indexed_bfs::util;
 using indexed_bfs::bfs::corebfs::distribution::yoo;
 using indexed_bfs::util::memory::make_with_capacity;
 using indexed_bfs::util::show::show;
-using indexed_bfs::util::sort_parallel::sort_parallel;
+using indexed_bfs::util::sort::sort_parallel;
 using indexed_bfs::util::types::to_sig;
 using indexed_bfs::util::types::to_unsig;
 

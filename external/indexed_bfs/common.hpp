@@ -10,9 +10,10 @@
 #include "util/bit.hpp"
 #include "util/iterator.hpp"
 #include "util/log.hpp"
+#include "util/math.hpp"
 #include "util/memory.hpp"
 #include "util/show.hpp"
-#include "util/sort_parallel.hpp"
+#include "util/sort.hpp"
 #include "util/time.hpp"
 #include "util/types.hpp"
 #include <algorithm>
@@ -34,10 +35,10 @@
 #define OR_DIE(cond)                                                           \
   indexed_bfs::common::detail::or_die((cond), #cond, __FILE__, __LINE__)
 
-#define LOG_RSS()                                                              \
+#define INDEXED_BFS_LOG_RSS()                                                  \
   do {                                                                         \
     const auto gds = indexed_bfs::common::summarize_rss_gb();                  \
-    LOG_I << "Five-number summary of RSSs in GiB: " << show::show(gds);        \
+    LOG_I << "RSS summary [GiB]: " << show::show(gds);                         \
   } while (false)
 
 // The header of OpenMPI generates warnings
@@ -104,7 +105,7 @@ struct platform_info {
 const platform_info &platform() {
   static platform_info info = {
 // fugaku
-#ifdef FUGAKU
+#ifdef __FUJITSU
       true
 #else
       false
@@ -340,6 +341,19 @@ static std::array<double, 5> summarize_rss_gb() {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
+//
+// Incomplete backport of `std::reduce()`
+//
+template <typename InputIterator>
+typename std::iterator_traits<InputIterator>::value_type
+reduce(const InputIterator first, const InputIterator last) {
+  typename std::iterator_traits<InputIterator>::value_type sum{};
+  for (InputIterator it = first; it != last; ++it) {
+    sum += *it;
+  }
+  return sum;
+}
+
 // Evenly splits the range of length `n_elems` into `n_parts` and returns a pair
 // of the begging index and the ending index of the `nth`-th part.
 static std::pair<size_t, size_t> split(const size_t n_elems,
@@ -356,7 +370,7 @@ auto five_number_summary(const InputIterator first, const InputIterator last)
   using value_type = typename std::iterator_traits<InputIterator>::value_type;
 
   std::vector<value_type> vec(first, last);
-  sort_parallel::sort_parallel(vec.begin(), vec.end());
+  sort::sort_parallel(vec.begin(), vec.end());
 
   const auto n = vec.size();
   const auto q0 = vec[0];
@@ -388,6 +402,7 @@ using detail::make_uint48;
 using detail::platform;
 using detail::random_seed1;
 using detail::random_seed2;
+using detail::reduce;
 using detail::split;
 using detail::summarize_rss_gb;
 using detail::uint40;

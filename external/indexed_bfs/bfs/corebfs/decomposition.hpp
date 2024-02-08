@@ -19,11 +19,10 @@ namespace detail {
 using namespace indexed_bfs::graph;
 using namespace indexed_bfs::util;
 using namespace indexed_bfs::bfs::corebfs::distribution;
-using indexed_bfs::common::int40;
-using indexed_bfs::common::make_int40;
+using namespace indexed_bfs::common;
 using indexed_bfs::util::bit::bit_vector;
 using indexed_bfs::util::memory::make_with_capacity;
-using indexed_bfs::util::sort_parallel::sort_parallel;
+using indexed_bfs::util::sort::sort_parallel;
 using indexed_bfs::util::types::to_sig;
 using indexed_bfs::util::types::to_unsig;
 
@@ -55,9 +54,11 @@ find_incident(const source_vertex s, std::vector<edge_2d> *const edges) {
                           [&](auto &e, auto s) { return e.source() < s; });
 }
 
-static std::vector<size_t> count_degrees(const yoo &d,
-                                         const std::vector<edge_2d> &edges_2d) {
-  std::vector<size_t> degs_loc;
+static std::vector<std::atomic<size_t>>
+count_degrees(const yoo &d, const std::vector<edge_2d> &edges_2d) {
+  INDEXED_BFS_TIMED_SCOPE(nullptr);
+
+  std::vector<std::atomic<size_t>> degs_loc;
 
   //
   // R = 3, C = 2:
@@ -73,8 +74,9 @@ static std::vector<size_t> count_degrees(const yoo &d,
   //
   for (int row_rank = 0; row_rank < d.row().size(); ++row_rank) {
     LOG_I << "Counting degrees for row rank " << row_rank;
+    INDEXED_BFS_LOG_RSS();
 
-    std::vector<size_t> degs_remote(d.unit_size());
+    std::vector<std::atomic<size_t>> degs_remote(d.unit_size());
 
     const auto low = make_source_vertex_from(d.unit_size() * row_rank);
     const auto high = make_source_vertex_from(d.unit_size() * (row_rank + 1));
@@ -82,9 +84,10 @@ static std::vector<size_t> count_degrees(const yoo &d,
     const auto first = find_incident(edges_2d, low);
     const auto last = find_incident(edges_2d, high);
 
-    for (auto it = first; it != last; ++it) {
-      const vertex u = d.to_local_remote(d.to_global(it->source()));
-      degs_remote[u.t] += 1;
+#pragma omp parallel for schedule(static)
+    for (ptrdiff_t i = 0; i < last - first; ++i) {
+      const vertex u = d.to_local_remote(d.to_global(first[i].source()));
+      degs_remote[u.t].fetch_add(1);
     }
 
     net::reduce_inplace(degs_remote.size(), MPI_SUM, row_rank, d.row(),
@@ -95,19 +98,32 @@ static std::vector<size_t> count_degrees(const yoo &d,
     }
   }
 
-  // All ranks should have a result
+  // Every rank should have a result
   assert(degs_loc.size() == d.unit_size());
+  // The sum of degrees should equal to the number of edges
+  assert([&]() {
+    const size_t d_local = std::accumulate(
+        degs_loc.begin(), degs_loc.end(), static_cast<size_t>(0),
+        [](auto x, auto &y) { return x + y.load(); });
+    const size_t d_global = net::reduce(d_local, MPI_SUM, 0, d.all());
+    const size_t m = net::reduce(edges_2d.size(), MPI_SUM, 0, d.all());
+    return d.all().rank() != 0 || d_global == m;
+  }());
 
   return degs_loc;
 }
 
-static bit_vector make_exist_mask(const yoo &d,
-                                  const std::vector<size_t> &degs_loc) {
+static bit_vector
+make_exist_mask(const yoo &d,
+                const std::vector<std::atomic<size_t>> &degs_loc) {
+  INDEXED_BFS_TIMED_SCOPE(nullptr);
+
   assert(degs_loc.size() == d.unit_size());
 
   bit_vector exists_loc(bit_vector_aligned_unit_size(d));
+#pragma omp parallel for schedule(static)
   for (size_t i = 0; i < degs_loc.size(); ++i) {
-    if (degs_loc[i] > 0) {
+    if (degs_loc[i].load() > 0) {
       exists_loc.set(i);
     }
   }
@@ -115,20 +131,17 @@ static bit_vector make_exist_mask(const yoo &d,
 }
 
 static std::vector<source_vertex>
-bcast_leaves(const yoo &d, const std::vector<size_t> &degs_loc,
-             const int row_root_rank) {
-  std::vector<source_vertex> leaves;
+find_leaves(const yoo &d, const std::vector<std::atomic<size_t>> &degs_loc) {
+  INDEXED_BFS_TIMED_SCOPE(nullptr);
 
-  if (d.row().rank() == row_root_rank) {
-    leaves.reserve(d.unit_size()); // Leaves are fewer than local vertices
-    for (vertex u(0); u.t < to_sig(degs_loc.size()); ++u.t) {
-      if (degs_loc[u.t] == 1) {
-        leaves.push_back(d.to_source(d.to_global(u)));
-      }
+  // Leaves are fewer than local vertices
+  auto leaves = make_with_capacity<std::vector<source_vertex>>(d.unit_size());
+  for (vertex u(0); u.t < to_sig(degs_loc.size()); ++u.t) {
+    if (degs_loc[u.t].load() == 1) {
+      leaves.push_back(d.to_source(d.to_global(u)));
     }
   }
-
-  net::bcast(row_root_rank, d.row(), &leaves);
+  leaves.shrink_to_fit();
   return leaves;
 }
 
@@ -143,39 +156,43 @@ static std::vector<edge>
 find_mark_twigs(const yoo &d, const std::vector<source_vertex> &leaves,
                 const bit_vector &exists_aligned_tgt,
                 std::vector<edge_2d> *const edges_2d) {
+  INDEXED_BFS_TIMED_SCOPE(nullptr);
+
   // Leaves have only one neighbor, and so twigs are fewer than them.
   auto twigs = make_with_capacity<std::vector<edge>>(leaves.size());
 
-  for (const source_vertex s : leaves) {
-    auto it = find_incident(s, edges_2d);
-    for (; it != edges_2d->end() && it->source() == s; ++it) {
-      const size_t i = bit_vector_aligned_index(d, it->target());
-      if (exists_aligned_tgt[i]) {
+#pragma omp parallel
+  {
+    std::deque<edge> es;
+
+#pragma omp for schedule(static)
+    for (size_t i = 0; i < leaves.size(); ++i) {
+      const source_vertex s = leaves[i];
+      auto it = find_incident(s, edges_2d);
+      for (; it != edges_2d->end() && it->source() == s; ++it) {
+        const size_t i = bit_vector_aligned_index(d, it->target());
+        if (!exists_aligned_tgt[i]) {
+          continue;
+        }
+
         // Add a found twig edge
         const global_vertex u = d.to_global(it->source());
         const global_vertex v = d.to_global(it->target());
-        twigs.push_back(make_edge(u, v));
+        es.push_back(make_edge(u, v));
 
-        // Mark the edge to remove by replacing the target with -1
-        // Note: do not replace the source since it makes the edge list unsorted
-        *it = make_edge_2d(it->source(), target_vertex(-1));
-
-        // The rest of the neighbors of `s` should be nonexistent
-        assert([&]() {
-          auto jt = it + 1;
-          for (; jt != edges_2d->end() && jt->source() == s; ++jt) {
-            const size_t j = bit_vector_aligned_index(d, jt->target());
-            if (exists_aligned_tgt[j]) {
-              return false;
-            }
-          }
-          return true;
-        }());
+        // Mark the edge to remove by replacing the target with -1.
+        // This keeps `edges_2d` sorted because `it->source()` has only one
+        // incident edge, and so the value of `it->target()` has nothing in the
+        // ordering.
+        it->set_target(target_vertex(-1));
 
         break;
       }
     }
-  }
+
+#pragma omp critical
+    std::copy(es.begin(), es.end(), std::back_inserter(twigs));
+  } // #pragma omp parallel
 
   assert(twigs.size() <= leaves.size());
   return twigs;
@@ -187,8 +204,6 @@ should_match_leaves_and_sources(const yoo &d,
                                 const std::vector<edge> &twigs_loc) {
   bool success = true;
   auto leaf_set = make_with_capacity<std::unordered_set<vertex>>(leaves.size());
-  auto source_set =
-      make_with_capacity<std::unordered_set<vertex>>(twigs_loc.size());
 
   // All the leaves are local vertices of this rank
   for (const source_vertex &s : leaves) {
@@ -200,14 +215,11 @@ should_match_leaves_and_sources(const yoo &d,
 
   // All the sources are local vertices of this rank
   for (const edge &e : twigs_loc) {
-    if (!source_set.insert(d.to_local(e.source())).second) {
-      LOG_E << "Duplicated twig source: " << e.source();
+    const vertex u = d.to_local(e.source());
+    if (leaf_set.erase(u) == 0) {
+      LOG_E << "Non-leaf twig source: " << d.to_global(u);
       success = false;
     }
-  }
-
-  if (leaf_set != source_set) {
-    success = false;
   }
 
   return success;
@@ -216,9 +228,11 @@ should_match_leaves_and_sources(const yoo &d,
 static void update_by_source(const yoo &d, const std::vector<edge> &twigs_2d,
                              const int row_rank,
                              const std::vector<source_vertex> &leaves,
-                             std::vector<size_t> *const degs_loc,
+                             std::vector<std::atomic<size_t>> *const degs_loc,
                              std::vector<global_vertex> *const parents_loc,
                              bit_vector *const exists_loc) {
+  INDEXED_BFS_TIMED_SCOPE(nullptr);
+
   // The number of the gathered twigs does not exceed `leaves.size() * 2`
   // because every source of the twigs are leaves.
   // `* 2` is necessary for the case that all the twigs are a two-vertex
@@ -232,37 +246,43 @@ static void update_by_source(const yoo &d, const std::vector<edge> &twigs_2d,
   assert(should_match_leaves_and_sources(d, leaves, twigs_loc));
   static_cast<void>(leaves); // Suppress warnings
 
-  for (const auto &e : twigs_loc) {
+#pragma omp parallel for schedule(static)
+  for (size_t i = 0; i < twigs_loc.size(); ++i) {
+    const edge &e = twigs_loc[i];
     const vertex s = d.to_local(e.source());
     // The source of every twig is a leaf, and the degree of a leaf is one.
     // However, if `s` is in a two-vertex connected component and the other
     // endpoint also appered in `twigs_loc`, its degree may be zero.
-    assert((*degs_loc)[s.t] <= 1);
-    (*degs_loc)[s.t] = 0;
+    assert((*degs_loc)[s.t].load() <= 1);
+    (*degs_loc)[s.t].store(0);
     (*parents_loc)[s.t] = e.target();
     exists_loc->set(s.t, false);
   }
 }
 
 static void update_by_target(const yoo &d, const std::vector<edge> &twigs,
-                             std::vector<size_t> *const degs_loc,
+                             std::vector<std::atomic<size_t>> *const degs_loc,
                              bit_vector *const exists_loc) {
-  const std::vector<edge> twigs_loc =
+  INDEXED_BFS_TIMED_SCOPE(nullptr);
+
+  const std::vector<vertex> twig_targets_loc =
       net::alltoallv_by(
           twigs,
           [&](auto &e) { return d.to_target(e.target()).t / d.unit_size(); },
-          d.column())
+          [&](auto &e) { return d.to_local_remote(e.target()); }, d.column())
           .data;
 
-  for (const auto &e : twigs_loc) {
-    const vertex u = d.to_local(e.target());
+#pragma omp parallel for schedule(static)
+  for (size_t i = 0; i < twig_targets_loc.size(); ++i) {
+    const vertex u = twig_targets_loc[i];
 
-    // `e.source()` is removed, and so the degree of `e.target()` decreases.
-    // Note that the degree of `e.target()` may be zero; this happens if `e` is
-    // an isolated connected component (both endpoints are leaves)
-    if ((*degs_loc)[u.t] > 0) {
-      (*degs_loc)[u.t] -= 1;
-      if ((*degs_loc)[u.t] == 0) {
+    // Decrease the degree of target vertices of twigs.
+    // Note that the degree of a target may be zero; this happens if `e` is an
+    // isolated connected component (both endpoints are leaves)
+    if ((*degs_loc)[u.t].load() > 0) {
+      const size_t d = (*degs_loc)[u.t].fetch_sub(1);
+      assert(d > 0); // Underflow if `d == 0`
+      if (d == 1) {  // Now `(*degs_loc)[u.t]` is zero
         exists_loc->set(u.t, false);
       }
     }
@@ -271,25 +291,21 @@ static void update_by_target(const yoo &d, const std::vector<edge> &twigs,
 
 static void remove_removed(const yoo &d, const bit_vector &exists_aligned_tgt,
                            std::vector<edge_2d> *const edges_2d) {
-  size_t i_put = 0;
-  for (size_t i_get = 0; i_get < edges_2d->size(); ++i_get) {
-    // Check if this edge is marked for removal
-    if ((*edges_2d)[i_get].target().t < 0) {
-      continue;
-    }
+  INDEXED_BFS_TIMED_SCOPE(nullptr);
 
-    // Check if the target is removed
-    const size_t t_aligned =
-        bit_vector_aligned_index(d, (*edges_2d)[i_get].target());
-    if (!exists_aligned_tgt[t_aligned]) {
-      continue;
+#pragma omp parallel for schedule(static)
+  for (size_t i = 0; i < edges_2d->size(); ++i) {
+    edge_2d *const e = &(*edges_2d)[i];
+    // Check if `e` is not yet marked for removal and if its target is removed
+    if (e->target().t >= 0 &&
+        !exists_aligned_tgt[bit_vector_aligned_index(d, e->target())]) {
+      e->set_target(target_vertex(-1));
     }
-
-    (*edges_2d)[i_put] = (*edges_2d)[i_get];
-    ++i_put;
   }
 
-  edges_2d->resize(i_put);
+  const auto it = std::remove_if(edges_2d->begin(), edges_2d->end(),
+                                 [](auto &e) { return e.target().t < 0; });
+  edges_2d->erase(it, edges_2d->end());
 }
 
 //
@@ -330,56 +346,24 @@ static void remove_removed(const yoo &d, const bit_vector &exists_aligned_tgt,
 //
 static std::vector<global_vertex>
 prune_trees(const yoo &d, std::vector<edge_2d> *const edges_2d) {
-  LOG_I << "Start finding 2-core";
-  LOG_RSS();
+  INDEXED_BFS_TIMED_SCOPE(nullptr);
+  INDEXED_BFS_LOG_RSS();
 
   // `vertex` -> degree
-  std::vector<size_t> degs_loc = count_degrees(d, *edges_2d);
-  LOG_RSS();
-
-  const size_t n =
-      net::reduce(std::accumulate(degs_loc.begin(), degs_loc.end(), 0), MPI_SUM,
-                  0, d.all());
-  const size_t m = net::reduce(edges_2d->size(), MPI_SUM, 0, d.all());
-  if (d.all().rank() == 0) {
-    LOG_E << "n = " << n << ", m = " << m;
-  }
-
-  //  // The sum of degrees should equal to the number of edges
-  //  assert([&]() {
-  //    const size_t n = net::reduce(
-  //      std::accumulate(degs_loc.begin(), degs_loc.end(), 0),
-  //      MPI_SUM,
-  //      0,
-  //      d.all()
-  //    );
-  //    const size_t m = net::reduce(
-  //      edges_2d->size(),
-  //      MPI_SUM,
-  //      0,
-  //      d.all()
-  //    );
-  //    if (d.all().rank() == 0) {
-  //      if (n != m) {
-  //        LOG_E << "n = " << n << ", m = " << m;
-  //      }
-  //      return n == m;
-  //    } else {
-  //      return true;
-  //    }
-  //  }());
+  std::vector<std::atomic<size_t>> degs_loc = count_degrees(d, *edges_2d);
+  INDEXED_BFS_LOG_RSS();
 
   // `vertex` -> parent
   std::vector<global_vertex> parents_loc(d.local_vertex_count(),
                                          global_vertex(-1));
-  LOG_RSS();
+  INDEXED_BFS_LOG_RSS();
 
   // `vertex` -> (does it have non-zero degree?)
   //
   // For directly using this data as a send buffer in communications, the size
   // is aligned to 64-bit boundary.
   bit_vector exists_loc = make_exist_mask(d, degs_loc);
-  LOG_RSS();
+  INDEXED_BFS_LOG_RSS();
 
   // `target` -> (does it exist?)
   //
@@ -393,10 +377,11 @@ prune_trees(const yoo &d, std::vector<edge_2d> *const edges_2d) {
   //
   bit_vector exists_aligned_tgt(bit_vector_aligned_unit_size(d) *
                                 d.column().size());
-  LOG_RSS();
+  INDEXED_BFS_LOG_RSS();
 
-  const size_t n_connected = net::count_if(
-      degs_loc.begin(), degs_loc.end(), d.all(), [](auto d) { return d > 0; });
+  const size_t n_connected =
+      net::count_if(degs_loc.begin(), degs_loc.end(), d.all(),
+                    [](auto &d) { return d.load() > 0; });
   if (d.all().rank() == 0) {
     const double p = static_cast<double>(n_connected) / d.global_vertex_count();
     LOG_I << "connected_vertex_count: " << n_connected;
@@ -404,6 +389,10 @@ prune_trees(const yoo &d, std::vector<edge_2d> *const edges_2d) {
   }
 
   for (int n_iter = 1;; ++n_iter) {
+    // Find leaves in the outside of a loop over `row_rank` for load balancing
+    std::vector<source_vertex> leaves_loc = find_leaves(d, degs_loc);
+    INDEXED_BFS_LOG_RSS();
+
     //
     // R = 3, C = 2
     //
@@ -428,7 +417,7 @@ prune_trees(const yoo &d, std::vector<edge_2d> *const edges_2d) {
     bool updated = false;
     for (int row_rank = 0; row_rank < d.row().size(); ++row_rank) {
       LOG_I << "Iteration " << n_iter << " for row rank " << row_rank;
-      LOG_RSS();
+      INDEXED_BFS_LOG_RSS();
 
       //
       //           +----+----+----+----+----+----+
@@ -467,8 +456,11 @@ prune_trees(const yoo &d, std::vector<edge_2d> *const edges_2d) {
       //           |              |              |
       //           +----+----+----+----+----+----+
       //
-      const std::vector<source_vertex> leaves =
-          bcast_leaves(d, degs_loc, row_rank);
+      std::vector<source_vertex> leaves;
+      if (d.row().rank() == row_rank) {
+        leaves = std::move(leaves_loc);
+      }
+      net::bcast(row_rank, d.row(), &leaves);
       updated = updated || leaves.size() > 0;
 
       //
@@ -537,12 +529,13 @@ prune_trees(const yoo &d, std::vector<edge_2d> *const edges_2d) {
     }
   }
 
+  LOG_I << "Removing tree edges...";
   const size_t m_orig = net::reduce(edges_2d->size(), MPI_SUM, 0, d.all());
   remove_removed(d, exists_aligned_tgt, edges_2d);
   const size_t m_core = net::reduce(edges_2d->size(), MPI_SUM, 0, d.all());
 
   const size_t n_core = net::count_if(degs_loc.begin(), degs_loc.end(), d.all(),
-                                      [](auto d) { return d > 0; });
+                                      [](auto &d) { return d.load() > 0; });
   if (d.all().rank() == 0) {
     const double pn = static_cast<double>(n_core) / d.global_vertex_count();
     LOG_I << "core_vertex_count: " << n_core;
@@ -567,11 +560,6 @@ using detail::prune_trees;
 } // namespace corebfs
 } // namespace bfs
 
-template <> MPI_Datatype net::detail::datatype_of<std::atomic<uint64_t>>() {
-  static_assert(sizeof(std::atomic<uint64_t>) == sizeof(uint64_t), "");
-  return net::datatype_of<uint64_t>();
-}
-
 template <>
 MPI_Datatype
 net::detail::datatype_of<bfs::corebfs::decomposition::detail::source_vertex>() {
@@ -594,7 +582,7 @@ MPI_Datatype net::detail::datatype_of<bfs::corebfs::decomposition::edge_2d>() {
   static MPI_Datatype t = MPI_DATATYPE_NULL;
   if (t == MPI_DATATYPE_NULL) {
     // Note: `edge_2d` is a packed struct
-    static_assert(sizeof(edge_2d) == sizeof(int40) * 2);
+    static_assert(sizeof(edge_2d) == sizeof(int40) * 2, "");
 
     constexpr int n = 2;
     const int lengths[n] = {1, 1};

@@ -72,6 +72,17 @@ template <typename T>
 using range_value_t =
     typename std::iterator_traits<range_iterator_t<T>>::value_type;
 
+//
+// `std::identity`
+//
+struct identity {
+  template <typename T>
+  constexpr auto operator()(T &&x) const noexcept
+      -> decltype(std::forward<T>(x)) {
+    return std::forward<T>(x);
+  }
+};
+
 ////////////////////////////////////////////////////////////////////////////////
 //
 // Property Checks
@@ -249,6 +260,7 @@ static constexpr auto to_unsig(const Signed x) -> std::make_unsigned_t<Signed> {
 } // namespace detail
 
 using detail::has_sub_operator;
+using detail::identity;
 using detail::is_range;
 using detail::is_range_v;
 using detail::newtype;

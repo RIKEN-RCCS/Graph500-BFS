@@ -32,7 +32,7 @@ using indexed_bfs::net::gathered_data;
 using indexed_bfs::util::memory::heap_size_of;
 using indexed_bfs::util::memory::make_with_capacity;
 using indexed_bfs::util::show::show;
-using indexed_bfs::util::sort_parallel::sort_parallel;
+using indexed_bfs::util::sort::sort_parallel;
 using indexed_bfs::util::types::to_sig;
 using indexed_bfs::util::types::to_unsig;
 
@@ -60,7 +60,7 @@ static std::vector<edge_2d> distribute(const yoo &d,
   // x2 for symmetrization, and x1.2 for anticipating imbalance in distribution
   const size_t m_estimated = static_cast<size_t>(edges.size() * 2 * 1.2);
   distributor distr(d, m_estimated);
-  LOG_RSS();
+  INDEXED_BFS_LOG_RSS();
 
   const size_t giga_bytes = static_cast<size_t>(1) << 30;
   // x2 for symmetrization
@@ -70,7 +70,7 @@ static std::vector<edge_2d> distribute(const yoo &d,
     const size_t ilast = std::min(i + chunk_len, edges.size());
     distr.feed(edges.begin() + i, edges.begin() + ilast);
     LOG_I << "Completed " << ilast << "/" << edges.size() << " edges";
-    LOG_RSS();
+    INDEXED_BFS_LOG_RSS();
   }
 
   auto edges_2d = distr.drain();
@@ -87,7 +87,7 @@ static bfs_index construct(const int scale, std::vector<edge> &&edges) {
 
   LOG_I << "Distributing edges...";
   auto edges_2d = distribute(d, std::move(edges));
-  LOG_RSS();
+  INDEXED_BFS_LOG_RSS();
 
   LOG_I << "Finding 2-core...";
   std::vector<global_vertex> parents_local = prune_trees(d, &edges_2d);
@@ -95,7 +95,7 @@ static bfs_index construct(const int scale, std::vector<edge> &&edges) {
 
   LOG_I << "Compressing a parent array...";
   parent_array tree_parents(std::move(parents_local));
-  LOG_RSS();
+  INDEXED_BFS_LOG_RSS();
 
   auto core = csr_1d::build(d, std::vector<edge>());
   //  LOG_I << "Constructing 1D-distribution CSR...";
@@ -362,12 +362,12 @@ gather_parents(const yoo &d, const std::vector<global_vertex> &parents_local) {
 }
 
 static graph500::result run(const argument::arguments &args) {
-  LOG_RSS();
+  INDEXED_BFS_LOG_RSS();
 
   LOG_I << "Start generating edges";
   auto edges_local = graph500::generate_edges(args.scale);
   LOG_I << "Completed generating edges";
-  LOG_RSS();
+  INDEXED_BFS_LOG_RSS();
 
   //  LOG_I << "For test: start constructing a global CSR";
   //  const auto edges_global = net::allgatherv(edges_local, net::world()).data;
@@ -379,7 +379,7 @@ static graph500::result run(const argument::arguments &args) {
   auto ix = construct(args.scale, std::move(edges_local));
   const auto construction_secs = time::elapsed_secs(construction_start);
   LOG_I << "Completed constructing a graph";
-  LOG_RSS();
+  INDEXED_BFS_LOG_RSS();
 
   return graph500::result{construction_secs};
 

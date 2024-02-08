@@ -11,6 +11,7 @@
 //
 #pragma once
 
+#include "macro.hpp"
 #include <chrono>
 #include <functional>
 #include <sstream>
@@ -60,17 +61,6 @@ static int milliseconds_of(const std::chrono::system_clock::time_point &p) {
   return static_cast<int>((ms % 1000).count());
 }
 
-static std::string extract_function_name(const char *const pretty_function) {
-  const char *first = pretty_function;
-  for (const char *p = pretty_function;; ++p) {
-    if (*p == ' ') {
-      first = p + 1;
-    } else if (*p == '(') {
-      return std::string(first, p);
-    }
-  }
-}
-
 static void default_printer(const record &r) {
   const auto now = std::chrono::system_clock::now();
   const time_t time = std::chrono::system_clock::to_time_t(now);
@@ -110,7 +100,7 @@ struct entry {
       : severity(_severity), file(_file), func(_func), line(_line), message() {}
 
   ~entry() {
-    const std::string f = extract_function_name(func);
+    const std::string f = macro::pretty_function_name_with_namespace(func);
     config.printer({severity, file, f.c_str(), line, message.str().c_str()});
   }
 

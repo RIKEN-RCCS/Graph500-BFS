@@ -6,17 +6,15 @@
 #ifndef COREBFS_ADAPTOR_HPP
 #define COREBFS_ADAPTOR_HPP
 
-#include <mpi.h>
-
 #pragma push_macro("__builtin_ctz")
 #pragma push_macro("__builtin_popcount")
 #undef __builtin_ctz
 #undef __builtin_popcount
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
+
 // Block include of "make_graph.h" since it generates link errors
 #define MAKE_GRAPH_H
-
 #include "indexed_bfs/bfs/corebfs.hpp"
 
 #pragma GCC diagnostic pop
@@ -27,13 +25,8 @@
 #include "../generator/graph_generator.hpp"
 #include "graph_constructor.hpp"
 
+#include <mpi.h>
 #include <random>
-
-// static const indexed_bfs::net::detail::comm
-// &indexed_bfs::net::detail::world() {
-//   static comm c = comm{mpi.comm_2d, mpi.rank_2d};
-//   return c;
-// }
 
 namespace corebfs_adaptor {
 namespace detail {
@@ -68,6 +61,13 @@ static UnweightedPackedEdge make_unweighted_packed_edge(const global_vertex s,
   return e;
 }
 
+static UnweightedPackedEdge make_unweighted_packed_edge(const yoo &d,
+                                                        const edge_2d &e) {
+  const global_vertex u = d.to_global(e.source());
+  const global_vertex v = d.to_global(e.target());
+  return make_unweighted_packed_edge(u, v);
+}
+
 //
 // Returns a vertex ID packed in an entry obtained from `BfsOnCPU::get_pred()`.
 // See `BfsValidation::get_pred_from_pred_entry()`, which is a private function.
@@ -77,48 +77,84 @@ static global_vertex get_pred_from_pred_entry(const int64_t pred_entry) {
 }
 
 static std::vector<edge_2d> distribute(const yoo &d, edge_storage *const stor) {
+  INDEXED_BFS_TIMED_SCOPE(nullptr);
+  INDEXED_BFS_LOG_RSS();
+
   const size_t m_estimate =
-      static_cast<size_t>(stor->edge_filled_size() * 2 * 1.2);
+      static_cast<size_t>(stor->num_local_edges() * 2 * 1.2);
   distributor distr(d, m_estimate);
+  INDEXED_BFS_LOG_RSS();
 
-  const int n = stor->beginRead(false);
-  for (int i = 0; i < n; ++i) {
-    UnweightedPackedEdge *p;
+  const int n_chunks = stor->beginRead(false);
+  for (int i = 0; i < n_chunks; ++i) {
+    // Set `nullptr` to suppress a warning of maybe-uninitialized
+    UnweightedPackedEdge *p = nullptr;
     const int n = stor->read(&p);
+    distr.feed(p, p + n, make_edge);
 
-    auto edges = make_with_capacity<std::vector<edge>>(n);
-    std::transform(p, p + n, std::back_inserter(edges), make_edge);
-
-    distr.feed(edges.begin(), edges.end());
+    LOG_I << "Completed " << i + 1 << "/" << n_chunks;
+    INDEXED_BFS_LOG_RSS();
   }
   stor->endRead();
 
   return distr.drain();
 }
 
+static std::vector<UnweightedPackedEdge> convert_upper(
+    const yoo &d, const edge_2d *const first, const edge_2d *const last) {
+  const ptrdiff_t n = last - first;
+  std::vector<UnweightedPackedEdge> ret(n);
+  std::vector<size_t> counts(omp_get_max_threads());
+  std::vector<size_t> offsets(omp_get_max_threads());
+
+#pragma omp parallel
+  {
+    const int tid = omp_get_thread_num();
+
+#pragma omp for
+    for (ptrdiff_t i = 0; i < n; ++i) {
+      const UnweightedPackedEdge e = make_unweighted_packed_edge(d, first[i]);
+      if (e.v0() < e.v1()) {
+        counts[tid] += 1;
+      }
+    }  // Implicit barrier at the end of "omp for"
+
+#pragma omp single
+    std::partial_sum(counts.begin(), counts.end() - 1, offsets.begin() + 1);
+
+#pragma omp for
+    for (ptrdiff_t i = 0; i < n; ++i) {
+      const UnweightedPackedEdge e = make_unweighted_packed_edge(d, first[i]);
+      if (e.v0() < e.v1()) {
+        ret[offsets[tid]] = e;
+        offsets[tid] += 1;
+      }
+    }
+  }
+
+  ret.resize(offsets.back());
+  return ret;
+}
+
 //
 // Writes all the edges in `edges_2d` to `output`.
 // Note that `edges_2d` is assumed to be symmetric, and this function writes
-// edge `(s, t)` s.t. `s < t` only.
+// only edges in the upper triangle, i.e., `(s, t)` s.t. `s < t`.
 //
 static void write(const yoo &d, const std::vector<edge_2d> &edges_2d,
                   edge_storage *const output) {
+  const auto chunk_size = edge_storage::CHUNK_SIZE;
+  const size_t n_chunks = (edges_2d.size() + chunk_size - 1) / chunk_size;
+
   output->beginWrite();
 
-  for (size_t i = 0; i < edges_2d.size(); i += edge_storage::CHUNK_SIZE) {
-    const size_t ilast =
-        std::min(i + edge_storage::CHUNK_SIZE, edges_2d.size());
-    auto chunk =
-        make_with_capacity<std::vector<UnweightedPackedEdge>>(ilast - i);
-    for (size_t j = i; j < ilast; ++j) {
-      const global_vertex u = d.to_global(edges_2d[j].source());
-      const global_vertex v = d.to_global(edges_2d[j].target());
-      if (u < v) {
-        chunk.push_back(make_unweighted_packed_edge(u, v));
-      }
-    }
-
+  for (size_t i_chunk = 0; i_chunk < n_chunks; ++i_chunk) {
+    const size_t i = i_chunk * chunk_size;
+    const size_t j = std::min((i_chunk + 1) * chunk_size, edges_2d.size());
+    std::vector<UnweightedPackedEdge> chunk =
+        convert_upper(d, &edges_2d[i], &edges_2d[j]);
     output->write(chunk.data(), chunk.size());
+    LOG_I << "Completed " << i_chunk + 1 << '/' << n_chunks;
   }
 
   output->endWrite();
@@ -216,7 +252,7 @@ class corebfs_index : types::noncopyable {
   //
   std::pair<int64_t, std::vector<std::pair<LocalVertex, int64_t>>> bfs_tree(
       const global_vertex_int root) const {
-    INDEXED_BFS_TIMED_SCOPE(bfs_tree);
+    INDEXED_BFS_TIMED_SCOPE(nullptr);
 
     // No reservation because it remains empty in most cases
     std::vector<std::pair<LocalVertex, int64_t>> path;
@@ -236,7 +272,7 @@ class corebfs_index : types::noncopyable {
   void write_tree_parents(
       int64_t *const pred,
       const std::vector<std::pair<LocalVertex, int64_t>> &path_to_core) const {
-    INDEXED_BFS_TIMED_SCOPE(write_tree_parents);
+    INDEXED_BFS_TIMED_SCOPE(nullptr);
 
     // `dump()` writes out each element of `pred` as if it is simple 64-bit
     // parent IDs although it is actually a concatenation of 16-bit depth and
@@ -287,7 +323,6 @@ static corebfs_index preprocess(const int scale, edge_storage *const input,
 
   LOG_I << "Distributing edges...";
   auto edges_2d = distribute(d, input);
-  LOG_RSS();
 
   LOG_I << "Finding 2-core...";
   std::vector<global_vertex> parents_local = prune_trees(d, &edges_2d);
@@ -295,9 +330,9 @@ static corebfs_index preprocess(const int scale, edge_storage *const input,
 
   LOG_I << "Compressing a parent array...";
   parent_array tree_parents(std::move(parents_local));
-  LOG_E << "ret tree size: " << tree_parents.size();
-  LOG_RSS();
+  INDEXED_BFS_LOG_RSS();
 
+  LOG_I << "Writing core edges...";
   write(d, edges_2d, output);
 
   return corebfs_index(std::move(d), std::move(tree_parents));

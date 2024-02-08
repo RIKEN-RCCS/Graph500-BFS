@@ -15,8 +15,8 @@ namespace detail {
 
 using namespace indexed_bfs::graph;
 using namespace indexed_bfs::util;
-using indexed_bfs::common::int40;
-using indexed_bfs::common::make_int40;
+using namespace indexed_bfs::common;
+using indexed_bfs::util::memory::make_with_capacity;
 using indexed_bfs::util::types::to_sig;
 using indexed_bfs::util::types::to_unsig;
 
@@ -312,8 +312,13 @@ struct __attribute__((packed)) edge_2d {
 
   source_vertex source() const { return source_.get(); }
 
+  void set_source(const source_vertex s) { source_ = make_int40(s.t); }
+
   target_vertex target() const { return target_.get(); }
+
+  void set_target(const target_vertex t) { target_ = make_int40(t.t); }
 };
+static_assert(std::is_pod<edge_2d>::value, "");
 static_assert(sizeof(edge_2d) == sizeof(int40) * 2, "");
 
 static edge_2d make_edge_2d(const source_vertex s, const target_vertex t) {
@@ -338,6 +343,22 @@ static edge_2d make_edge_2d(const yoo &d, const edge &e) {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
+template <typename T>
+static std::vector<std::atomic<T>>
+copy_atomic_vector(const std::vector<T> &orig) {
+  std::vector<std::atomic<T>> ret(orig.size());
+  for (size_t i = 0; i < orig.size(); ++i) {
+    ret[i].store(orig[i]);
+  }
+  return ret;
+}
+
+template <typename T>
+static void deduplicate(std::vector<edge_2d> *const sorted_edges) {
+  const auto last = std::unique(sorted_edges->begin(), sorted_edges->end());
+  sorted_edges->resize(last - sorted_edges->begin());
+}
+
 class distributor : types::noncopyable {
   const yoo &dist_;
   std::vector<edge_2d> edges_;
@@ -353,71 +374,106 @@ public:
   // 2. Removes self-loops.
   // 3. Symmetrize edges.
   //
-  template <typename RandomAccessIterator>
-  void feed(RandomAccessIterator first, RandomAccessIterator last) {
-    std::vector<int> send_counts(dist_.all().size());
-    for (RandomAccessIterator it = first; it != last; ++it) {
-      if (it->source() != it->target()) {
-        send_counts[dist_.owner_rank(*it)] += 1;
-        send_counts[dist_.owner_rank(it->reverse())] += 1;
+  // `convert` is used to convert the value type of `RandomAccessIterator` to
+  // `graph::edge`.
+  // Wrapping the iterator with a something like `boost::transform_iterator` or
+  // `std::ranges::views::transform` might be better in terms of generality, but
+  // doing it in C++14 without Boost is painful...
+  //
+  template <typename RandomAccessIterator,
+            typename EdgeConverter = types::identity>
+  void feed(RandomAccessIterator first, RandomAccessIterator last,
+            EdgeConverter convert = types::identity{}) {
+    INDEXED_BFS_TIMED_SCOPE(nullptr);
+
+    using difference_type =
+        typename std::iterator_traits<RandomAccessIterator>::difference_type;
+    const difference_type n = last - first;
+
+    std::vector<std::atomic<int>> send_counts(dist_.all().size());
+    {
+      INDEXED_BFS_TIMED_SCOPE("send_counts");
+#pragma omp parallel for schedule(static)
+      for (difference_type i = 0; i < n; ++i) {
+        const edge &e = convert(first[i]);
+        // Remove self-loops
+        if (e.source() != e.target()) {
+          send_counts[dist_.owner_rank(e)].fetch_add(1);
+          send_counts[dist_.owner_rank(e.reverse())].fetch_add(1);
+        }
       }
     }
 
     const std::vector<int> send_displs = net::make_displacements(send_counts);
 
     std::vector<edge_2d> send_data(send_displs.back() + send_counts.back() + 1);
-    std::vector<int> n_puts = send_displs;
-    for (RandomAccessIterator it = first; it != last; ++it) {
-      if (it->source() != it->target()) {
-        {
-          const int rank = dist_.owner_rank(*it);
-          send_data[n_puts[rank]] = make_edge_2d_remote(dist_, *it);
-          n_puts[rank] += 1;
-        }
-        {
-          const int rank = dist_.owner_rank(it->reverse());
-          send_data[n_puts[rank]] = make_edge_2d_remote(dist_, it->reverse());
-          n_puts[rank] += 1;
+    std::vector<std::atomic<int>> n_puts = copy_atomic_vector(send_displs);
+    {
+      INDEXED_BFS_TIMED_SCOPE("send_data");
+#pragma omp parallel for schedule(static)
+      for (difference_type i = 0; i < n; ++i) {
+        const edge &e = convert(first[i]);
+        if (e.source() != e.target()) {
+          const int j = n_puts[dist_.owner_rank(e)].fetch_add(1);
+          send_data[j] = make_edge_2d_remote(dist_, e);
+          const int k = n_puts[dist_.owner_rank(e.reverse())].fetch_add(1);
+          send_data[k] = make_edge_2d_remote(dist_, e.reverse());
         }
       }
     }
 
-    const std::vector<int> recv_counts =
+    const std::vector<std::atomic<int>> recv_counts =
         net::alltoall(send_counts, dist_.all());
     const std::vector<int> recv_displs = net::make_displacements(recv_counts);
 
-    const size_t head_index = edges_.size();
+    const size_t orig_len = edges_.size();
     const size_t recv_total = recv_displs.back() + recv_counts.back();
-    const size_t required_size = edges_.size() + recv_total;
-    if (edges_.capacity() < required_size) {
+    const size_t req_len = edges_.size() + recv_total;
+    if (edges_.capacity() < req_len) {
       LOG_W << "Reallocation: {capacity: " << edges_.capacity()
-            << ", required: " << required_size << "}";
+            << ", required: " << req_len << "}";
     }
-    edges_.resize(required_size);
+    edges_.resize(req_len);
 
-    net::alltoallv(send_data.data(), send_counts.data(), send_displs.data(),
-                   edges_.data() + head_index, recv_counts.data(),
-                   recv_displs.data(), dist_.all());
+    {
+      INDEXED_BFS_TIMED_SCOPE("alltoallv");
+      net::alltoallv(send_data.data(),
+                     reinterpret_cast<const int *>(send_counts.data()),
+                     send_displs.data(), edges_.data() + orig_len,
+                     reinterpret_cast<const int *>(recv_counts.data()),
+                     recv_displs.data(), dist_.all());
+    }
 
-    assert(std::all_of(edges_.begin() + head_index, edges_.end(), [&](auto &e) {
+    assert(std::all_of(edges_.begin() + orig_len, edges_.end(), [&](auto &e) {
       return e.source().t < to_sig(dist_.source_length()) &&
              e.target().t < to_sig(dist_.target_length());
     }));
   }
 
   std::vector<edge_2d> drain() {
+    INDEXED_BFS_TIMED_SCOPE(nullptr);
+
+    //
+    // `util::sort::sort_parallel()` requires additional memory at
+    // `std::inplace_merge()` (empirically, its size seems almost the half of
+    // the size of `edges_`, which is critically large), and so we use Boost
+    // Sort Parallel instead.
+    //
     LOG_I << "Sorting...";
-    sort_parallel::sort_parallel(edges_.begin(), edges_.end());
+    sort::compact_parallel_sort(edges_.begin(), edges_.end());
 
+    //
+    // We avoid to use the erase-remove idiom because `erase()` requires a
+    // significant amount of memory for some reason (copying the contents to
+    // new memory region?).
+    // We also do not call `shrink_to_fit()` because of its additional memory
+    // consumption.
+    //
     LOG_I << "Deduplicating...";
-    edges_.erase(std::unique(edges_.begin(), edges_.end()), edges_.end());
+    const auto last = std::unique(edges_.begin(), edges_.end());
+    edges_.resize(last - edges_.begin());
 
-    // On Fugaku, `shrink_to_fit()` temporarily doubles memory consumption
-    if (!common::platform().fugaku) {
-      edges_.shrink_to_fit();
-    }
-
-    LOG_RSS();
+    INDEXED_BFS_LOG_RSS();
     return std::move(edges_);
   }
 };

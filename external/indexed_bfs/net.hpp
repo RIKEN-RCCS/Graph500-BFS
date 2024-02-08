@@ -224,13 +224,23 @@ static MPI_Datatype commit_contiguous(const int count,
 //
 ////////////////////////////////////////////////////////////////////////////////
 
+template <> MPI_Datatype datatype_of<std::atomic<int>>() {
+  static_assert(sizeof(std::atomic<int>) == sizeof(int), "");
+  return datatype_of<int>();
+}
+
+template <> MPI_Datatype datatype_of<std::atomic<uint64_t>>() {
+  static_assert(sizeof(std::atomic<uint64_t>) == sizeof(uint64_t), "");
+  return datatype_of<uint64_t>();
+}
+
 template <> MPI_Datatype datatype_of<common::uint40>() {
   using common::uint40;
 
   static MPI_Datatype t = MPI_DATATYPE_NULL;
   if (t == MPI_DATATYPE_NULL) {
     // Note: `uint40` is a packed struct
-    static_assert(sizeof(uint40) == 5);
+    static_assert(sizeof(uint40) == 5, "");
 
     constexpr int n = 2;
     const int lengths[n] = {1, 1};
@@ -276,6 +286,16 @@ static std::vector<int> make_displacements(const std::vector<int> &counts) {
   auto ds = make_with_capacity<std::vector<int>>(counts.size());
   ds.push_back(0);
   std::partial_sum(counts.begin(), counts.end() - 1, std::back_inserter(ds));
+  return ds;
+}
+
+static std::vector<int>
+make_displacements(const std::vector<std::atomic<int>> &counts) {
+  auto ds = make_with_capacity<std::vector<int>>(counts.size());
+  ds.push_back(0);
+  for (size_t i = 0; i + 1 < counts.size(); ++i) {
+    ds.push_back(ds[i] + counts[i].load()); // ds[i + 1] = ...
+  }
   return ds;
 }
 

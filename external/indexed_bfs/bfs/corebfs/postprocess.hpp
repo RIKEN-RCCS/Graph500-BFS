@@ -19,7 +19,7 @@ using indexed_bfs::bfs::corebfs::distribution::yoo;
 using indexed_bfs::bfs::corebfs::structures::parent_array;
 using indexed_bfs::net::gathered_data;
 using indexed_bfs::util::memory::make_with_capacity;
-using indexed_bfs::util::sort_parallel::sort_parallel;
+using indexed_bfs::util::sort::sort_parallel;
 using indexed_bfs::util::types::to_sig;
 using indexed_bfs::util::types::to_unsig;
 
@@ -107,7 +107,6 @@ static std::vector<bool>
 propagate_reachability(const yoo &d, const parent_array &tree_parents,
                        const global_vertex *const core_parents_local) {
   const size_t n_local = tree_parents.size();
-  LOG_E << "n_local = " << n_local;
   std::vector<bool> reach_local(n_local);
   // Initial state: the core vertices in the GCC are reachable
   for (vertex u{0}; u.t < to_sig(n_local); ++u.t) {
