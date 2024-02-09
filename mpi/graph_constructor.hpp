@@ -1873,8 +1873,8 @@ class GraphConstructor2DCSR {
       print_with_prefix("local_bits = %d org_local_bits = %d reorder_bits = %d",
                         local_bits_, org_local_bits_, reorder_bits_);
 #else
-      print_with_prefix("local_bits = %d org_local_bits = %d",
-                        local_bits_, org_local_bits_);
+      print_with_prefix("local_bits = %d org_local_bits = %d", local_bits_,
+                        org_local_bits_);
 #endif
     }
 
@@ -2261,7 +2261,7 @@ DECODE(sort_v); g.edge_array_.set(idx, v);
   int org_local_bits_;  // local bits for original vertex id
   int local_bits_;      // local bits for reordered vertex id
 #ifdef SMALL_REORDER_BIT
-  int reorder_bits_;    // bits for reordering
+  int reorder_bits_;  // bits for reordering
 #endif
 
   DegreeCalculation* degree_calc_;
