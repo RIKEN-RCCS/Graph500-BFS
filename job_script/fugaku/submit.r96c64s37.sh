@@ -1,7 +1,7 @@
 #!/bin/bash
 #PJM -L "node=8x24x32:strict"
 #PJM -L "rscgrp=large"
-#PJM -L "elapse=0:30:00"
+#PJM -L "elapse=1:00:00"
 #PJM -L "freq=2200,eco_state=2"
 #PJM --rsc-list "retention_state=0"
 #PJM --mpi "assign-online-node"

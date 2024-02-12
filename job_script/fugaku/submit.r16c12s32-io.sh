@@ -1,7 +1,7 @@
 #!/bin/bash
 #PJM -L "node=4x6x8:strict"
 #PJM -L "rscgrp=small-torus"
-#PJM -L "elapse=0:30:00"
+#PJM -L "elapse=1:00:00"
 #PJM -L "freq=2200,eco_state=2"
 #PJM --rsc-list "retention_state=0"
 #PJM --llio localtmp-size=80Gi
