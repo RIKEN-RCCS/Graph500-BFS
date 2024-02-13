@@ -376,7 +376,6 @@ struct DegreeCalculation {
   int log_local_verts_unit_;
 #ifdef SMALL_REORDER_BIT
   int reorder_bits_;
-  int org_reorder_bits_;
 #endif
 
   int64_t* wide_row_length_;
@@ -1869,9 +1868,15 @@ class GraphConstructor2DCSR {
     if (mpi.isMaster())
       print_with_prefix("Begin construction. Number of iterations is %d.",
                         num_loops);
-    if (mpi.isMaster())
+    if (mpi.isMaster()) {
+#ifdef SMALL_REORDER_BIT
       print_with_prefix("local_bits = %d org_local_bits = %d reorder_bits = %d",
                         local_bits_, org_local_bits_, reorder_bits_);
+#else
+      print_with_prefix("local_bits = %d org_local_bits = %d", local_bits_,
+                        org_local_bits_);
+#endif
+    }
 
     for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
       EdgeType* edge_data;
@@ -2255,7 +2260,9 @@ DECODE(sort_v); g.edge_array_.set(idx, v);
 
   int org_local_bits_;  // local bits for original vertex id
   int local_bits_;      // local bits for reordered vertex id
-  int reorder_bits_;    // bits for reordering
+#ifdef SMALL_REORDER_BIT
+  int reorder_bits_;  // bits for reordering
+#endif
 
   DegreeCalculation* degree_calc_;
 
