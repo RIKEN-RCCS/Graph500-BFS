@@ -3279,7 +3279,7 @@ void BfsBase::run_bfs(int64_t root, int64_t* pred, const int edgefactor,
 
   // Traverse to the 2-core and overwrite `root`
   int64_t core_root;
-  std::vector<std::pair<LocalVertex, int64_t>> path_to_core;
+  std::vector<std::pair<uint32_t, int64_t>> path_to_core;
   std::tie(core_root, path_to_core) = corebfs_->bfs_tree(root);
   run_bfs_core(core_root, pred, edgefactor, alpha, beta, auto_tuning_data);
   corebfs_->write_tree_parents(pred, path_to_core);

@@ -250,12 +250,12 @@ class corebfs_index : types::noncopyable {
   // `[(u, parent)]` would be empty on most of the ranks because a path from
   // `root` to the 2-core is expected to be short (<10 even for SCALE 43).
   //
-  std::pair<int64_t, std::vector<std::pair<LocalVertex, int64_t>>> bfs_tree(
+  std::pair<int64_t, std::vector<std::pair<uint32_t, int64_t>>> bfs_tree(
       const global_vertex_int root) const {
     INDEXED_BFS_TIMED_SCOPE(nullptr);
 
     // No reservation because it remains empty in most cases
-    std::vector<std::pair<LocalVertex, int64_t>> path;
+    std::vector<std::pair<uint32_t, int64_t>> path;
 
     const global_vertex core_root = corebfs::bfs_tree_with_callback(
         dist_, tree_parents_, global_vertex(root),
@@ -271,7 +271,7 @@ class corebfs_index : types::noncopyable {
   //
   void write_tree_parents(
       int64_t *const pred,
-      const std::vector<std::pair<LocalVertex, int64_t>> &path_to_core) const {
+      const std::vector<std::pair<uint32_t, int64_t>> &path_to_core) const {
     INDEXED_BFS_TIMED_SCOPE(nullptr);
 
     // `dump()` writes out each element of `pred` as if it is simple 64-bit
