@@ -1722,7 +1722,7 @@ class BfsBase {
   //-------------------------------------------------------------//
 
   void botto_up_print_stt(int64_t num_blocks, int64_t num_vertexes,
-                          int* nq_count) {
+                          int64_t* nq_count) {
     int64_t send_stt[2] = {num_vertexes, num_blocks};
     int64_t sum_stt[2];
     int64_t max_stt[2];
@@ -1741,11 +1741,10 @@ class BfsBase {
     }
     int count_length = mpi.size_2dc;
     int start_proc = mpi.rank_2dc;
-    int size_mask = count_length - 1;
     int64_t phase_count[count_length];
     int64_t phase_recv[count_length];
     for (int i = 0; i < count_length; ++i) {
-      phase_count[i] = nq_count[(start_proc + i) & size_mask];
+      phase_count[i] = nq_count[(start_proc + i) % count_length];
     }
     MPI_Reduce(phase_count, phase_recv, count_length, MpiTypeOf<int64_t>::type,
                MPI_SUM, 0, MPI_COMM_WORLD);
@@ -2729,7 +2728,7 @@ class BfsBase {
   }
 #endif  // #if BFELL
 
-  void bottom_up_gather_nq_size(int* visited_count) {
+  void bottom_up_gather_nq_size(int64_t* visited_count) {
 #ifdef PROFILE_REGIONS
     timer_start(IMBALANCE_TIME);
 #endif
@@ -2740,9 +2739,9 @@ class BfsBase {
 #if 1  // which one is faster ?
     int recv_count[mpi.size_2dc];
     for (int i = 0; i < mpi.size_2dc; ++i) recv_count[i] = 1;
-    MPI_Reduce_scatter(visited_count, &nq_size_, recv_count, MPI_INT, MPI_SUM,
+    MPI_Reduce_scatter(visited_count, &nq_size_, recv_count, MpiTypeOf<int64_t>::type, MPI_SUM,
                        mpi.comm_2dr);
-    MPI_Allreduce(&nq_size_, &max_nq_size_, 1, MPI_INT, MPI_MAX, mpi.comm_2d);
+    MPI_Allreduce(&nq_size_, &max_nq_size_, 1, MpiTypeOf<int64_t>::type, MPI_MAX, mpi.comm_2d);
 #ifdef PROFILE_REGIONS
     timer_stop(IMBALANCE_TIME);
 #endif
@@ -2785,7 +2784,7 @@ class BfsBase {
     PROF(gather_nq_time_ += tk_all);
   }
 
-  void bottom_up_bmp_parallel_section(int* visited_count) {
+  void bottom_up_bmp_parallel_section(int64_t* visited_count) {
     PROF(profiling::TimeKeeper tk_all);
     int bitmap_width = get_bitmap_size_local();
     int step_bitmap_width = bitmap_width / BU_SUBSTEP;
@@ -2877,8 +2876,8 @@ class BfsBase {
 
   struct BottomUpBitmapParallelSection : public Runnable {
     ThisType* this_;
-    int* visited_count;
-    BottomUpBitmapParallelSection(ThisType* this__, int* visited_count_)
+    int64_t* visited_count;
+    BottomUpBitmapParallelSection(ThisType* this__, int64_t* visited_count_)
         : this_(this__), visited_count(visited_count_) {}
     virtual void run() { this_->bottom_up_bmp_parallel_section(visited_count); }
   };
@@ -2887,7 +2886,7 @@ class BfsBase {
     TRACER(bu_bmp);
     int max_threads = omp_get_max_threads();
     int comm_size = mpi.size_2dc;
-    int visited_count[comm_size * max_threads];
+    int64_t visited_count[comm_size * max_threads];
     for (int i = 0; i < comm_size * max_threads; ++i) visited_count[i] = 0;
 
     bu_comm_.prepare();
@@ -2904,7 +2903,7 @@ class BfsBase {
     VERVOSE(bottom_up_substep_->print_stt());
   }
 
-  void bottom_up_list_parallel_section(int* visited_count,
+  void bottom_up_list_parallel_section(int64_t* visited_count,
                                        int8_t* vertex_enabled,
                                        int64_t& num_blocks,
                                        int64_t& num_vertexes) {
@@ -3045,7 +3044,7 @@ class BfsBase {
         (int8_t*)cache_aligned_xcalloc(buffer_size * sizeof(int8_t));
 
     int comm_size = mpi.size_2dc;
-    int visited_count[comm_size];
+    int64_t visited_count[comm_size];
     for (int i = 0; i < comm_size; ++i) visited_count[i] = 0;
 
     bu_comm_.prepare();
@@ -3206,8 +3205,8 @@ class BfsBase {
   // cq_list_ is a pointer to work_buf_ or work_extra_buf_
   TwodVertex* cq_list_;
   TwodVertex cq_size_;
-  int nq_size_;
-  int max_nq_size_;
+  int64_t nq_size_;
+  int64_t max_nq_size_;
   int64_t global_nq_edges_ = 0;
   int64_t global_nq_size_;
 
