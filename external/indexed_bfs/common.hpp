@@ -38,7 +38,7 @@
 #define INDEXED_BFS_LOG_RSS()                                                  \
   do {                                                                         \
     const auto gds = indexed_bfs::common::summarize_rss_gb();                  \
-    LOG_I << "RSS summary [GiB]: " << show::show(gds);                         \
+    LOG_I << "RSS summary [GiB]: " << indexed_bfs::util::show::show(gds);      \
   } while (false)
 
 // The header of OpenMPI generates warnings

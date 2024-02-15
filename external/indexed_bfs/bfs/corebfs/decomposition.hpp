@@ -74,7 +74,6 @@ count_degrees(const yoo &d, const std::vector<edge_2d> &edges_2d) {
   //
   for (int row_rank = 0; row_rank < d.row().size(); ++row_rank) {
     LOG_I << "Counting degrees for row rank " << row_rank;
-    INDEXED_BFS_LOG_RSS();
 
     std::vector<std::atomic<size_t>> degs_remote(d.unit_size());
 
@@ -90,8 +89,12 @@ count_degrees(const yoo &d, const std::vector<edge_2d> &edges_2d) {
       degs_remote[u.t].fetch_add(1);
     }
 
+    INDEXED_BFS_LOG_RSS();
     net::reduce_inplace(degs_remote.size(), MPI_SUM, row_rank, d.row(),
                         degs_remote.data());
+    INDEXED_BFS_LOG_RSS();
+    malloc_trim(0);
+    INDEXED_BFS_LOG_RSS();
 
     if (d.row().rank() == row_rank) {
       degs_loc = std::move(degs_remote);

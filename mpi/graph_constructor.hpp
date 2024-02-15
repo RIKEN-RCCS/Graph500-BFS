@@ -1906,7 +1906,9 @@ class GraphConstructor2DCSR {
 
       if (mpi.isMaster()) print_with_prefix("Scatter edges...");
 
+      INDEXED_BFS_LOG_RSS();
       EdgeType* recv_edges = scatter.scatter(edges_to_send);
+      INDEXED_BFS_LOG_RSS();
       const int num_recv_edges = scatter.get_recv_count();
 
       int64_t* src_converted =
