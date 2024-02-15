@@ -386,7 +386,8 @@ prune_trees(const yoo &d, std::vector<edge_2d> *const edges_2d) {
       net::count_if(degs_loc.begin(), degs_loc.end(), d.all(),
                     [](auto &d) { return d.load() > 0; });
   if (d.all().rank() == 0) {
-    const double p = static_cast<double>(n_connected_global) / d.global_vertex_count();
+    const double p =
+        static_cast<double>(n_connected_global) / d.global_vertex_count();
     LOG_I << "connected_vertex_count: " << n_connected_global;
     LOG_I << "connected_vertex_proportion: " << p;
   }
@@ -474,14 +475,14 @@ prune_trees(const yoo &d, std::vector<edge_2d> *const edges_2d) {
       updated = updated || leaves.size() > 0;
 
       const size_t n_leaves_global =
-        net::reduce(leaves.size(), MPI_SUM, 0, d.column());
+          net::reduce(leaves.size(), MPI_SUM, 0, d.column());
       n_removed_global += n_leaves_global;
 
       if (d.all().rank() == 0) {
         LOG_I << "n_leaves_global: " << n_leaves_global;
         LOG_I << "n_removed_global: " << n_removed_global;
+        assert(n_removed_global <= n_connected_global);
       }
-      assert(n_removed_global <= n_connected_global);
 
       //
       // In row_rank = 0:

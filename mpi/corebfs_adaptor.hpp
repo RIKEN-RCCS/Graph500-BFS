@@ -27,6 +27,7 @@
 
 #include <mpi.h>
 #include <random>
+#include <utility>
 
 namespace corebfs_adaptor {
 namespace detail {
@@ -134,6 +135,12 @@ static std::vector<UnweightedPackedEdge> convert_upper(
 
   ret.resize(offsets.back());
   return ret;
+}
+
+static void shuffle_edges(std::vector<edge_2d> *const edges_2d) {
+  std::random_device rd;
+  std::mt19937_64 g(rd());
+  std::shuffle(edges_2d->begin(), edges_2d->end(), g);
 }
 
 //
@@ -331,6 +338,9 @@ static corebfs_index preprocess(const int scale, edge_storage *const input,
   LOG_I << "Compressing a parent array...";
   parent_array tree_parents(std::move(parents_local));
   INDEXED_BFS_LOG_RSS();
+
+  LOG_I << "Shuffling core edges...";
+  shuffle_edges(&edges_2d);
 
   LOG_I << "Writing core edges...";
   write(d, edges_2d, output);

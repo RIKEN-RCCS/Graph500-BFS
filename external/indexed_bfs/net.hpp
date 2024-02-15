@@ -572,32 +572,48 @@ static int init_thread(int *const argc, char ***const argv,
 //
 // Note that `map` is assumed to be lightweight; it is applied multiple
 // times to each element.
-template <typename T, typename RankMapper, typename Transformer>
-static auto alltoallv_by(const std::vector<T> &data, RankMapper map,
-                         Transformer transform, const comm &c)
-    -> gathered_data<decltype(transform(std::declval<const T>()))> {
-  using output_type = decltype(transform(std::declval<const T>()));
+template <typename RandomAccessIterator, typename RankMapper,
+          typename Transformer = types::identity>
+static auto alltoallv_by(const RandomAccessIterator first,
+                         const RandomAccessIterator last, const comm &c,
+                         RankMapper map,
+                         Transformer transform = types::identity{})
+    -> gathered_data<decltype(transform(*first))> {
+  using output_type = decltype(transform(*first));
 
   std::vector<int> counts(c.size());
-  for (const auto &x : data) {
-    counts[map(x)] += 1;
+  for (RandomAccessIterator it = first; it != last; ++it) {
+    counts[map(*it)] += 1;
   }
 
   const auto displs = make_displacements(counts);
 
   // Cannot use `std::vector` because `output_type` may lack a default
   // constructor.
-  std::unique_ptr<output_type[]> reordered_data(new output_type[data.size()]);
+  std::unique_ptr<output_type[]> reordered_data(new output_type[last - first]);
   auto indices = displs; // copy
-  for (const auto &x : data) {
-    const int rank = map(x);
-    reordered_data[indices[rank]] = transform(x);
+  for (RandomAccessIterator it = first; it != last; ++it) {
+    const int rank = map(*it);
+    reordered_data[indices[rank]] = transform(*it);
     indices[rank] += 1;
     assert(rank + 1 == c.size() || indices[rank] <= displs[rank + 1]);
-    assert(rank + 1 < c.size() || indices[rank] <= to_sig(data.size()));
+    assert(rank + 1 < c.size() || indices[rank] <= last - first);
   }
 
   return alltoallv(reordered_data.get(), counts.data(), displs.data(), c);
+}
+
+// Perform Alltoallv by given mapping and transformation.
+//
+// Note that `map` is assumed to be lightweight; it is applied multiple
+// times to each element.
+//
+// TODO: reorder arguments
+template <typename T, typename RankMapper, typename Transformer>
+static auto alltoallv_by(const std::vector<T> &data, RankMapper map,
+                         Transformer transform, const comm &c)
+    -> gathered_data<decltype(transform(std::declval<const T>()))> {
+  return alltoallv_by(data.begin(), data.end(), c, map, transform);
 }
 
 //
