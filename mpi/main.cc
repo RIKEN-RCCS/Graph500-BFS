@@ -388,12 +388,11 @@ void auto_tuning(int root_start, int num_bfs_roots, BfsOnCPU *benchmark,
 }
 
 void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
-                  int validation_level, bool auto_tuning_enabled,
+                  int num_bfs_roots, int validation_level, bool auto_tuning_enabled,
                   bool corebfs_enabled, bool pre_exec, bool real_benchmark) {
   using namespace PRM;
   SET_AFFINITY;
 
-  int num_bfs_roots = (real_benchmark) ? REAL_BFS_ROOTS : TEST_BFS_ROOTS;
   int64_t auto_tuning_data[num_bfs_roots][AUTO_NUM];
   double bfs_times[num_bfs_roots], validate_times[num_bfs_roots],
       edge_counts[num_bfs_roots];
@@ -722,12 +721,12 @@ static void print_help(char *argv) {
   // validate all results Note: To conform to the specification, you must set 2
 }
 
-static void set_args(const int argc, char **argv, int *edge_factor,
-                     double *alpha, double *beta, int *validation_level,
+static void set_args(const int argc, char **argv, int *edge_factor, double *alpha,
+		     double *beta, int *num_bfs_roots, int *validation_level,
                      bool *auto_tuning_enabled, bool *corebfs_enabled,
                      bool *pre_exec, bool *real_benchmark) {
   int result;
-  while ((result = getopt(argc, argv, "e:a:b:v:ACPR")) != -1) {
+  while ((result = getopt(argc, argv, "e:a:b:n:v:ACPR")) != -1) {
     switch (result) {
       case 'e':
         *edge_factor = atoi(optarg);
@@ -741,6 +740,10 @@ static void set_args(const int argc, char **argv, int *edge_factor,
         *beta = atof(optarg);
         if (*beta <= 0) ERROR("-b value > 0\n");
         break;
+      case 'n':
+	*num_bfs_roots = atoi(optarg);
+	if (*num_bfs_roots <= 0) ERROR("-n value > 0\n");
+	break;
       case 'v':
         *validation_level = atoi(optarg);
         if (*validation_level < 0 || *validation_level > 2)
@@ -772,21 +775,23 @@ int main(int argc, char **argv) {
       DEFAULT_EDGE_FACTOR;  // nedges / nvertices, i.e., 2*avg. degree
   double alpha = DEFAULT_ALPHA;
   double beta = DEFAULT_BETA;
+  int num_bfs_roots = TEST_BFS_ROOTS;
   int validation_level = DEFAULT_VALIDATION_LEVEL;
   bool auto_tuning_enabled = false;
   bool corebfs_enabled = false;
   bool real_benchmark = false;
   bool pre_exec = false;
 
-  set_args(argc, argv, &edge_factor, &alpha, &beta, &validation_level,
+  set_args(argc, argv, &edge_factor, &alpha, &beta, &num_bfs_roots, &validation_level,
            &auto_tuning_enabled, &corebfs_enabled, &pre_exec, &real_benchmark);
   if (real_benchmark) {
+    num_bfs_roots = REAL_BFS_ROOTS;
     validation_level = 2;
     pre_exec = true;
   }
 
   setup_globals(argc, argv, scale, edge_factor);
-  graph500_bfs(scale, edge_factor, alpha, beta, validation_level,
+  graph500_bfs(scale, edge_factor, alpha, beta, num_bfs_roots, validation_level,
                auto_tuning_enabled, corebfs_enabled, pre_exec, real_benchmark);
   cleanup_globals();
 
