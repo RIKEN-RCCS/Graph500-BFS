@@ -30,7 +30,7 @@ int max_num_buffers = 0;
 
 #define debug(...) debug_print(BFSMN, __VA_ARGS__)
 
-using ::corebfs_adaptor::parent_array;
+using ::corebfs_adaptor::corebfs_index;
 
 struct LocalPacket {
   enum {
@@ -105,7 +105,7 @@ class BfsBase {
         bottom_up_comm_(this),
         td_comm_(mpi.comm_2dc, &top_down_comm_),
         bu_comm_(mpi.comm_2dr, &bottom_up_comm_),
-        tree_parents_(),
+        corebfs_(),
         denom_bitmap_to_list_(DENOM_BITMAP_TO_LIST) {}
 
   virtual ~BfsBase() {
@@ -140,8 +140,7 @@ class BfsBase {
     }
     EdgeListStorage<UnweightedPackedEdge> core_edge_list(n_edges, path_ptr);
 
-    tree_parents_ =
-        corebfs_adaptor::preprocess(scale, edge_list, &core_edge_list);
+    corebfs_ = corebfs_adaptor::preprocess(scale, edge_list, &core_edge_list);
     constructor.construct(&core_edge_list, log_local_verts_unit, graph_);
   }
 
@@ -152,9 +151,8 @@ class BfsBase {
     malloc_trim(0);
     allocate_memory();
 
-    if (tree_parents_.has_value()) {
-      corebfs_adaptor::reset_unreachable(this, edgefactor, alpha, beta, pred,
-                                         &*tree_parents_);
+    if (corebfs_.has_value()) {
+      corebfs_->reset_unreachable(this, edgefactor, alpha, beta, pred);
     }
   }
 
@@ -173,9 +171,8 @@ class BfsBase {
   void end_bfs() { deallocate_memory(); }
 
   bool has_edge(const int64_t root) const {
-    const bool is_tree = tree_parents_.has_value() &&
-                         corebfs_adaptor::contains(*tree_parents_, root);
-    return graph_.has_edge(root) || is_tree;
+    return graph_.has_edge(root) ||
+           (corebfs_.has_value() && corebfs_->contains_parent(root));
   }
 
   GraphType graph_;
@@ -3201,7 +3198,7 @@ class BfsBase {
   ThreadLocalBuffer** thread_local_buffer_;
   memory::ConcurrentPool<QueuedVertexes> nq_empty_buffer_;
   memory::ConcurrentStack<QueuedVertexes*> nq_;
-  tl::optional<parent_array> tree_parents_;
+  tl::optional<corebfs_index> corebfs_;
 
   // switch parameters
   double denom_bitmap_to_list_;  // gamma
@@ -3275,7 +3272,7 @@ class BfsBase {
 void BfsBase::run_bfs(int64_t root, int64_t* pred, const int edgefactor,
                       const double alpha, const double beta,
                       int64_t* auto_tuning_data) {
-  if (!tree_parents_) {
+  if (!corebfs_) {
     run_bfs_core(root, pred, edgefactor, alpha, beta, auto_tuning_data);
     return;
   }
@@ -3283,15 +3280,9 @@ void BfsBase::run_bfs(int64_t root, int64_t* pred, const int edgefactor,
   // Traverse to the 2-core and overwrite `root`
   int64_t core_root;
   std::vector<std::pair<LocalVertex, int64_t>> path_to_core;
-  std::tie(core_root, path_to_core) =
-      corebfs_adaptor::bfs_tree(*tree_parents_, root);
-
+  std::tie(core_root, path_to_core) = corebfs_->bfs_tree(root);
   run_bfs_core(core_root, pred, edgefactor, alpha, beta, auto_tuning_data);
-
-  corebfs_adaptor::write_tree_parents(*tree_parents_, pred);
-  for (const auto& p : path_to_core) {
-    pred[p.first] = p.second;
-  }
+  corebfs_->write_tree_parents(pred, path_to_core);
 }
 
 //

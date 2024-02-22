@@ -29,7 +29,9 @@ using namespace indexed_bfs;
 // We employ the definition shown in
 // https://en.cppreference.com/w/cpp/types/void_t.
 //
-template <typename... Ts> struct make_void { typedef void type; };
+template <typename... Ts> struct make_void {
+  typedef void type;
+};
 
 template <typename... Ts> using void_t = typename make_void<Ts...>::type;
 
@@ -69,6 +71,17 @@ template <typename T> using range_iterator_t = typename range_iterator<T>::type;
 template <typename T>
 using range_value_t =
     typename std::iterator_traits<range_iterator_t<T>>::value_type;
+
+//
+// `std::identity`
+//
+struct identity {
+  template <typename T>
+  constexpr auto operator()(T &&x) const noexcept
+      -> decltype(std::forward<T>(x)) {
+    return std::forward<T>(x);
+  }
+};
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -131,66 +144,77 @@ struct has_eq_operator<T,
                        void_t<decltype(std::declval<T>() == std::declval<T>())>>
     : std::true_type {};
 
+//
+// Checks if `T` has an operator `-`
+//
+template <typename T, typename = void>
+struct has_sub_operator : std::false_type {};
+
+template <typename T>
+struct has_sub_operator<T,
+                        void_t<decltype(std::declval<T>() - std::declval<T>())>>
+    : std::true_type {};
+
 ////////////////////////////////////////////////////////////////////////////////
 //
-// wrapper
+// newtype
 //
 ////////////////////////////////////////////////////////////////////////////////
 
 //
-// Wrapper for strong typedef.
+// Wrapper for strong typedef, named after Haskell's newtype keyword.
 // `Tag` should be a unique type for distinguishing strongly-typedef'ed type.
 //
-template <typename T, typename Tag> class wrapper {
+template <typename T, typename Tag> class newtype {
 public:
   using inner_type = T;
   using tag_type = Tag;
 
   T t; // Name is derived from `BOOST_STRONG_TYPEDEF`
 
-  wrapper() {}
+  newtype() {}
 
-  wrapper(const T &_t) : t(std::move(_t)) {}
+  newtype(const T &_t) : t(std::move(_t)) {}
 
   template <typename U = T>
   std::enable_if_t<has_lt_operator<U>::value, bool>
-  operator<(const wrapper<T, Tag> &x) const {
+  operator<(const newtype<T, Tag> &x) const {
     return t < x.t;
   }
 
   template <typename U = T>
   std::enable_if_t<has_le_operator<U>::value, bool>
-  operator<=(const wrapper<T, Tag> &x) const {
+  operator<=(const newtype<T, Tag> &x) const {
     return t <= x.t;
   }
 
   template <typename U = T>
   std::enable_if_t<has_gt_operator<U>::value, bool>
-  operator>(const wrapper<T, Tag> &x) const {
+  operator>(const newtype<T, Tag> &x) const {
     return t > x.t;
   }
 
   template <typename U = T>
   std::enable_if_t<has_ge_operator<U>::value, bool>
-  operator>=(const wrapper<T, Tag> &x) const {
+  operator>=(const newtype<T, Tag> &x) const {
     return t >= x.t;
   }
 
   template <typename U = T>
   std::enable_if_t<has_eq_operator<U>::value, bool>
-  operator==(const wrapper<T, Tag> &x) const {
+  operator==(const newtype<T, Tag> &x) const {
     return t == x.t;
   }
 
   template <typename U = T>
   std::enable_if_t<has_eq_operator<U>::value, bool>
-  operator!=(const wrapper<T, Tag> &x) const {
+  operator!=(const newtype<T, Tag> &x) const {
     return !(t == x.t);
   }
 };
 
 template <typename T, typename Tag>
-std::ostream &operator<<(std::ostream &os, const wrapper<T, Tag> &w) {
+std::ostream &operator<<(std::ostream &os, const newtype<T, Tag> &w) {
   os << w.t;
   return os;
 }
@@ -235,16 +259,31 @@ static constexpr auto to_unsig(const Signed x) -> std::make_unsigned_t<Signed> {
 
 } // namespace detail
 
+using detail::has_sub_operator;
+using detail::identity;
 using detail::is_range;
 using detail::is_range_v;
+using detail::newtype;
 using detail::noncopyable;
 using detail::range_iterator;
 using detail::range_iterator_t;
 using detail::range_value_t;
 using detail::to_sig;
 using detail::to_unsig;
-using detail::wrapper;
 
 } // namespace types
 } // namespace util
 } // namespace indexed_bfs
+
+////////////////////////////////////////////////////////////////////////////////
+//
+// Definitions in Other Namespaces
+//
+////////////////////////////////////////////////////////////////////////////////
+
+template <typename T, typename Tag>
+struct std::hash<indexed_bfs::util::types::newtype<T, Tag>> {
+  size_t operator()(const indexed_bfs::util::types::newtype<T, Tag> &x) const {
+    return std::hash<T>{}(x.t);
+  }
+};

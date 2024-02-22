@@ -15,97 +15,16 @@
 namespace indexed_bfs {
 namespace bfs {
 namespace corebfs {
-namespace parent_array {
+namespace structures {
 namespace detail {
 
 using namespace graph;
 using namespace util;
-using util::memory::heap_size_of;
-using util::types::to_sig;
-using util::types::to_unsig;
-
-////////////////////////////////////////////////////////////////////////////////
-//
-// int48x2
-//
-////////////////////////////////////////////////////////////////////////////////
-
-//
-// Length-2 array of two signed 48-bit integers.
-//
-struct int48x2 {
-  uint16_t highs[2];
-  uint32_t lows[2];
-
-  // Pair of two 0s. Note that an instance of `int48x2` is not implicitly
-  // zero-cleared.
-  static constexpr int48x2 zero();
-
-  // Returns 64-bit signed integer extended from the 48-bit signed integer
-  // correponding to index `i` (`i` must be 0 or 1).
-  //
-  // Note: This function returns non-reference `int64_t` although most
-  // implementations of `operator[]() const` return const references.
-  // However, returning reference seems not mandatory because we can find
-  // counterexamples in the C++ Standard Library.
-  // For example, `std::bitset::operator[]() const` returns `bool`.
-  //
-  int64_t operator[](const size_t i) const {
-    assert(i < 2);
-
-    const uint64_t y = (static_cast<uint64_t>(highs[i]) << 32) | lows[i];
-    return y < 0x7fffffffffff ? y : y - 0xffffffffffff;
-  }
-
-  void set(const size_t i, const int64_t x) {
-    assert(i < 2);
-
-    const uint64_t y = x >= 0 ? x : x + 0xffffffffffff;
-    highs[i] = static_cast<uint16_t>(y >> 32);
-    lows[i] = static_cast<uint32_t>(y);
-
-    assert((*this)[i] == x);
-  }
-};
-static_assert(sizeof(int48x2) == 12, "");
-
-constexpr int48x2 int48x2::zero() { return {{0, 0}, {0, 0}}; }
-
-////////////////////////////////////////////////////////////////////////////////
-//
-// int48_array
-//
-////////////////////////////////////////////////////////////////////////////////
-
-class int48_array {
-  std::vector<int48x2> data_;
-  size_t size_; // Needed because `data_.size() * 2` may be `size_ + 1`
-
-public:
-  int48_array(const size_t n = 0) : data_((n + 1) / 2), size_(n) {}
-
-  int64_t operator[](const size_t i) const {
-    assert(i < size_);
-    return data_[i / 2][i % 2];
-  }
-
-  void resize(const size_t new_size) {
-    data_.resize((new_size + 1) / 2);
-    size_ = new_size;
-  }
-
-  void set(const size_t i, const int64_t x) {
-    assert(i < size_);
-    data_[i / 2].set(i % 2, x);
-    assert((*this)[i] == x);
-  }
-
-  size_t size() const { return size_; }
-
-  friend size_t heap_size_of(const int48_array &x) {
-    return memory::heap_size_of(x.data_);
-  }
-};
+using indexed_bfs::common::int48;
+using indexed_bfs::common::make_int48;
+using indexed_bfs::util::memory::heap_size_of;
+using indexed_bfs::util::types::to_sig;
+using indexed_bfs::util::types::to_unsig;
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -196,40 +115,30 @@ public:
 
 private:
   // Number of vertices in this array.
+  // `operator[](u)` returns a value for `u` s.t. `0 <= u.t < size_`.
   size_t size_;
   // Metadata for each block of `word_bits` (maybe 64) vertices.
   // The metadata for vertex `u` is stored in `metas_[u.t / word_bits]`.
-  // However, since parent-less vertices do not need metadata, the length of
-  // this vector may be less than `ceil(size_ / word_bits)`.
   std::vector<metadata> metas_;
   // Parents of vertices that have parents.
-  int48_array parents_;
+  std::vector<int48> parents_;
 
 public:
-  parent_array() : size_(0), metas_(), parents_() {}
+  parent_array() : size_(), metas_(), parents_() {}
   parent_array(parent_array &&) = default;
   parent_array &operator=(parent_array &&) = default;
 
   parent_array(const std::vector<global_vertex> &parents)
       : size_(parents.size()), metas_(), parents_() {
-    if (parents.size() == 0) {
-      return;
-    }
-
     //
     // Initialize metas_
     //
-    const size_t n_local = parents.size(); // parents.size() > 0
-    vertex last(n_local - 1);              // Last vertex that has a parent
-    while (last.t > 0 && parents[last.t] >= 0) {
-      --last.t;
-    }
-    metas_.resize((last.t + 1 + 63) / 64);
+    metas_.resize((size_ + word_bits - 1) / word_bits);
 
     uint32_t sum = 0;
     for (size_t i = 0; i < metas_.size(); ++i) {
       uint64_t b = 0;
-      for (size_t j = 0; j < 64 && i * 64 + j < n_local; ++j) {
+      for (size_t j = 0; j < 64 && i * 64 + j < size_; ++j) {
         const uint64_t t = parents[i * 64 + j].t >= 0 ? 1 : 0;
         b |= t << j;
       }
@@ -244,7 +153,7 @@ public:
     size_t n_parents = 0;
     for (const auto u : parents) {
       if (u.t >= 0) {
-        parents_.set(n_parents, u.t);
+        parents_[n_parents] = make_int48(u.t);
         ++n_parents;
       }
     }
@@ -257,11 +166,14 @@ public:
   // returns `vertex{-1}`.
   //
   global_vertex operator[](const vertex u) const {
+    assert(u.t >= 0);
+    assert(u.t < to_sig(size_));
+
     const size_t i = u.t / word_bits;
     const size_t j = u.t % word_bits;
-    if (i < metas_.size() && metas_[i].contains[j]) {
+    if (metas_[i].contains[j]) {
       const size_t n = count_ones_before(metas_[i].contains, j);
-      return global_vertex(parents_[metas_[i].prefix_sum + n]);
+      return global_vertex(parents_[metas_[i].prefix_sum + n].get());
     } else {
       return global_vertex(-1);
     }
@@ -278,9 +190,10 @@ public:
   iterator end() const { return iterator(*this, make_vertex_from(size_)); }
 
   bool contains(const vertex u) const {
+    assert(u.t >= 0);
     assert(u.t < to_sig(size_));
-    const size_t i = u.t / word_bits;
-    return i < metas_.size() && metas_[i].contains[u.t % word_bits];
+
+    return metas_[u.t / word_bits].contains[u.t % word_bits];
   }
 
   //
@@ -294,7 +207,7 @@ public:
 
       for (const size_t bit_pos : bit::iterate_ones(m->contains)) {
         const auto child = make_vertex_from(i_meta * word_bits + bit_pos);
-        const auto parent = global_vertex(parents_[i_parent]);
+        const auto parent = global_vertex(parents_[i_parent].get());
         parents[child.t] = parent;
         ++i_parent;
       }
@@ -311,17 +224,10 @@ public:
     for (const auto p : *this) {
       const vertex child = p.first;
       const global_vertex parent = p.second;
-      parents_.set(i, m(child, parent).t);
+      parents_[i] = make_int48(m(child, parent).t);
       ++i;
     }
   }
-
-  //
-  // Sets the size to `n`.
-  // If `n` is greater than the current size, all the vertices that are
-  // currently nonexistent will be associated to `global_vertex(-1)`.
-  //
-  void resize(const size_t n) { size_ = n; }
 
   //
   // Retains parents of vertices that `pred` returned `true`, and removes the
@@ -341,9 +247,9 @@ public:
 
       for (const size_t bit_pos : bit::iterate_ones(m->contains)) {
         const auto child = make_vertex_from(i_meta * word_bits + bit_pos);
-        const auto parent = global_vertex{parents_[i_get]};
+        const auto parent = global_vertex(parents_[i_get].get());
         if (pred(child, parent)) {
-          parents_.set(i_put, parents_[i_get]);
+          parents_[i_put] = parents_[i_get];
           ++i_put;
         } else {
           m->contains.reset(bit_pos);
@@ -394,7 +300,7 @@ static void test_parent_array(const parent_array &result,
 
 using detail::parent_array;
 
-} // namespace parent_array
+} // namespace structures
 } // namespace corebfs
 } // namespace bfs
 } // namespace indexed_bfs

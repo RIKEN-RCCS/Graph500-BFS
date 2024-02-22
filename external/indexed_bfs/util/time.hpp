@@ -5,6 +5,7 @@
 //
 #pragma once
 
+#include "macro.hpp"
 #include <algorithm>
 #include <chrono>
 #include <fstream>
@@ -17,10 +18,9 @@
 // The total times consumed in each scope are shown by `print_all_scopes()`.
 //
 #define INDEXED_BFS_TIMED_SCOPE(scope_name)                                    \
-  static indexed_bfs::util::time::detail::record record_##scope_name(          \
-      #scope_name);                                                            \
-  const indexed_bfs::util::time::detail::entry scope_##scope_name(             \
-      &record_##scope_name)
+  const auto indexed_bfs_entry##__COUNTER__ =                                  \
+      indexed_bfs::util::time::detail::make_entry(__PRETTY_FUNCTION__,         \
+                                                  scope_name, []() {})
 
 namespace indexed_bfs {
 namespace util {
@@ -60,29 +60,50 @@ static auto time(F f)
 ////////////////////////////////////////////////////////////////////////////////
 
 struct record;
+template <typename UniqueTag> struct entry;
+static void print_all_scopes();
 
 static std::vector<record *> g_records;
 
 struct record {
-  const char *const name;
-  double total_secs;
-  size_t entry_count;
+  const char *const pretty_function;
+  const char *const scope_name;
+  std::atomic<uint64_t> total_nanos; // Total duration in nanoseconds
+  std::atomic<uint64_t> entry_count;
 
-  record(const char *const _name) : name(_name), total_secs(), entry_count() {
+  record(const char *const _pretty_function, const char *const _scope_name)
+      : pretty_function(_pretty_function), scope_name(_scope_name),
+        total_nanos(), entry_count() {
     g_records.push_back(this);
   }
 };
 
-struct entry {
-  record *const target;
-  std::chrono::high_resolution_clock::time_point start;
+template <typename UniqueTag>
+static entry<UniqueTag> make_entry(const char *const pretty_function,
+                                   const char *const scope_name, UniqueTag) {
+  static record r(pretty_function, scope_name);
+  return entry<UniqueTag>(&r);
+}
 
-  entry(record *const _target) : target(_target), start(now()) {}
+template <typename UniqueTag> class entry {
+  record *const record_;
+  std::chrono::high_resolution_clock::time_point start_;
 
+public:
   ~entry() {
-    target->total_secs += elapsed_secs(start);
-    target->entry_count += 1;
+    const uint64_t ns = std::chrono::nanoseconds(now() - start_).count();
+    record_->total_nanos.fetch_add(ns);
+    record_->entry_count.fetch_add(1);
   }
+
+private:
+  entry(record *const r) : record_(r), start_(now()) {}
+
+  friend void print_all_scopes();
+
+  template <typename T>
+  friend entry<T> make_entry(const char *const pretty_function,
+                             const char *const scope_name, T);
 };
 
 //
@@ -95,10 +116,18 @@ static void print_all_scopes() {
   ss << "timed_scopes:\n";
 
   for (const auto &r : g_records) {
-    ss << "  ";
-    ss << r->name << ": {total_secs: " << r->total_secs;
+    const double secs = 0.000000001 * r->total_nanos;
+    const std::string func =
+        macro::pretty_function_name_with_namespace(r->pretty_function);
+    ss << "- {function: '" << func;
+    if (r->scope_name == nullptr) {
+      ss << "', scope: null";
+    } else {
+      ss << "', scope: '" << r->scope_name << '\'';
+    }
     ss << ", entry_count: " << r->entry_count;
-    ss << ", average_secs: " << r->total_secs / r->entry_count << "}\n";
+    ss << ", total_secs: " << secs;
+    ss << ", average_secs: " << secs / r->entry_count << "}\n";
   }
 
   std::cerr << ss.str();

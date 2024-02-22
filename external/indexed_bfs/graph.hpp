@@ -25,11 +25,11 @@ using util::memory::make_with_capacity;
 
 struct vertex_tag;
 using vertex_int = int32_t;
-using vertex = wrapper<vertex_int, vertex_tag>;
+using vertex = newtype<vertex_int, vertex_tag>;
 
 struct global_vertex_tag;
 using global_vertex_int = int64_t;
-using global_vertex = wrapper<global_vertex_int, global_vertex_tag>;
+using global_vertex = newtype<global_vertex_int, global_vertex_tag>;
 
 //
 // Make a `vertex` from an integer.
@@ -66,12 +66,11 @@ static global_vertex make_global_vertex_from(const Int x) {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
+struct edge;
+static edge make_edge(const global_vertex source, const global_vertex target);
+
 struct edge {
   packed_edge t;
-
-  global_vertex source() const { return global_vertex{get_v0_from_edge(&t)}; }
-
-  global_vertex target() const { return global_vertex{get_v1_from_edge(&t)}; }
 
   bool operator<(const edge &other) const {
     return source().t < other.source().t ||
@@ -82,15 +81,21 @@ struct edge {
     return t.v0_low == other.t.v0_low && t.v1_low == other.t.v1_low &&
            t.high == other.t.high;
   }
+
+  global_vertex source() const { return global_vertex{get_v0_from_edge(&t)}; }
+
+  global_vertex target() const { return global_vertex{get_v1_from_edge(&t)}; }
+
+  edge reverse() const { return make_edge(target(), source()); }
 };
 static_assert(sizeof(edge) == 12, "");
 
-std::ostream &operator<<(std::ostream &os, const edge &e) {
+static std::ostream &operator<<(std::ostream &os, const edge &e) {
   os << "(" << e.source().t << ", " << e.target().t << ")";
   return os;
 }
 
-edge make_edge(const global_vertex source, const global_vertex target) {
+static edge make_edge(const global_vertex source, const global_vertex target) {
   edge e;
   write_edge(&e.t, source.t, target.t);
   return e;
