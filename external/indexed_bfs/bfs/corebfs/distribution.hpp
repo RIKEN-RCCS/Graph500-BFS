@@ -98,7 +98,7 @@ class yoo : types::noncopyable {
   net::comm all_;
   net::comm row_;
   net::comm column_;
-  uint32_t unit_size_;
+  size_t unit_size_;
 
 public:
   yoo(const int scale, net::comm all, net::comm row, net::comm column)
@@ -271,18 +271,17 @@ public:
   }
 
 private:
-  uint32_t unit(const global_vertex u) const {
+  size_t unit(const global_vertex u) const {
     assert(u.t >= 0);
-    return static_cast<uint32_t>(u.t % all_.size());
+    return u.t % all_.size();
   }
 
-  uint32_t index_in_unit(const global_vertex u) const {
+  size_t index_in_unit(const global_vertex u) const {
     assert(u.t >= 0);
-    assert(to_unsig(u.t) / all_.size() <= std::numeric_limits<uint32_t>::max());
-    return static_cast<uint32_t>(u.t / all_.size());
+    return u.t / all_.size();
   }
 
-  global_vertex ununit(const uint32_t unit_id, const uint32_t index) const {
+  global_vertex ununit(const size_t unit_id, const size_t index) const {
     const global_vertex ret(
         static_cast<global_vertex_int>(index) * all_.size() + unit_id);
     assert(unit(ret) == unit_id);

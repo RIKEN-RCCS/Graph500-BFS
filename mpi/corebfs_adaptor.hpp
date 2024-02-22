@@ -27,6 +27,7 @@
 
 #include <mpi.h>
 #include <random>
+#include <utility>
 
 namespace corebfs_adaptor {
 namespace detail {
@@ -134,6 +135,12 @@ static std::vector<UnweightedPackedEdge> convert_upper(
 
   ret.resize(offsets.back());
   return ret;
+}
+
+static void shuffle_edges(std::vector<edge_2d> *const edges_2d) {
+  std::random_device rd;
+  std::mt19937_64 g(rd());
+  std::shuffle(edges_2d->begin(), edges_2d->end(), g);
 }
 
 //
@@ -250,12 +257,12 @@ class corebfs_index : types::noncopyable {
   // `[(u, parent)]` would be empty on most of the ranks because a path from
   // `root` to the 2-core is expected to be short (<10 even for SCALE 43).
   //
-  std::pair<int64_t, std::vector<std::pair<LocalVertex, int64_t>>> bfs_tree(
+  std::pair<int64_t, std::vector<std::pair<uint32_t, int64_t>>> bfs_tree(
       const global_vertex_int root) const {
     INDEXED_BFS_TIMED_SCOPE(nullptr);
 
     // No reservation because it remains empty in most cases
-    std::vector<std::pair<LocalVertex, int64_t>> path;
+    std::vector<std::pair<uint32_t, int64_t>> path;
 
     const global_vertex core_root = corebfs::bfs_tree_with_callback(
         dist_, tree_parents_, global_vertex(root),
@@ -271,7 +278,7 @@ class corebfs_index : types::noncopyable {
   //
   void write_tree_parents(
       int64_t *const pred,
-      const std::vector<std::pair<LocalVertex, int64_t>> &path_to_core) const {
+      const std::vector<std::pair<uint32_t, int64_t>> &path_to_core) const {
     INDEXED_BFS_TIMED_SCOPE(nullptr);
 
     // `dump()` writes out each element of `pred` as if it is simple 64-bit
@@ -331,6 +338,9 @@ static corebfs_index preprocess(const int scale, edge_storage *const input,
   LOG_I << "Compressing a parent array...";
   parent_array tree_parents(std::move(parents_local));
   INDEXED_BFS_LOG_RSS();
+
+  LOG_I << "Shuffling core edges...";
+  shuffle_edges(&edges_2d);
 
   LOG_I << "Writing core edges...";
   write(d, edges_2d, output);

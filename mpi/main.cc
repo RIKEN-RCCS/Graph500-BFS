@@ -24,6 +24,7 @@
 #include "primitives.hpp"
 #include "utils.hpp"
 #include "../generator/graph_generator.hpp"
+#include "corebfs_adaptor.hpp"
 #include "graph_constructor.hpp"
 #include "validate.hpp"
 #include "benchmark_helper.hpp"

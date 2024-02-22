@@ -74,7 +74,6 @@ count_degrees(const yoo &d, const std::vector<edge_2d> &edges_2d) {
   //
   for (int row_rank = 0; row_rank < d.row().size(); ++row_rank) {
     LOG_I << "Counting degrees for row rank " << row_rank;
-    INDEXED_BFS_LOG_RSS();
 
     std::vector<std::atomic<size_t>> degs_remote(d.unit_size());
 
@@ -90,8 +89,12 @@ count_degrees(const yoo &d, const std::vector<edge_2d> &edges_2d) {
       degs_remote[u.t].fetch_add(1);
     }
 
+    INDEXED_BFS_LOG_RSS();
     net::reduce_inplace(degs_remote.size(), MPI_SUM, row_rank, d.row(),
                         degs_remote.data());
+    INDEXED_BFS_LOG_RSS();
+    malloc_trim(0);
+    INDEXED_BFS_LOG_RSS();
 
     if (d.row().rank() == row_rank) {
       degs_loc = std::move(degs_remote);
@@ -379,16 +382,24 @@ prune_trees(const yoo &d, std::vector<edge_2d> *const edges_2d) {
                                 d.column().size());
   INDEXED_BFS_LOG_RSS();
 
-  const size_t n_connected =
+  const size_t n_connected_global =
       net::count_if(degs_loc.begin(), degs_loc.end(), d.all(),
                     [](auto &d) { return d.load() > 0; });
   if (d.all().rank() == 0) {
-    const double p = static_cast<double>(n_connected) / d.global_vertex_count();
-    LOG_I << "connected_vertex_count: " << n_connected;
+    const double p =
+        static_cast<double>(n_connected_global) / d.global_vertex_count();
+    LOG_I << "connected_vertex_count: " << n_connected_global;
     LOG_I << "connected_vertex_proportion: " << p;
   }
 
+  // Total number of removed vertices (leaves)
+  size_t n_removed_global = 0;
+
   for (int n_iter = 1;; ++n_iter) {
+    // Condition to avoid infinite loop; the diameter of Kronecker graphs is
+    // usually small.
+    OR_DIE(n_iter <= 32);
+
     // Find leaves in the outside of a loop over `row_rank` for load balancing
     std::vector<source_vertex> leaves_loc = find_leaves(d, degs_loc);
     INDEXED_BFS_LOG_RSS();
@@ -462,6 +473,16 @@ prune_trees(const yoo &d, std::vector<edge_2d> *const edges_2d) {
       }
       net::bcast(row_rank, d.row(), &leaves);
       updated = updated || leaves.size() > 0;
+
+      const size_t n_leaves_global =
+          net::reduce(leaves.size(), MPI_SUM, 0, d.column());
+      n_removed_global += n_leaves_global;
+
+      if (d.all().rank() == 0) {
+        LOG_I << "n_leaves_global: " << n_leaves_global;
+        LOG_I << "n_removed_global: " << n_removed_global;
+        assert(n_removed_global <= n_connected_global);
+      }
 
       //
       // In row_rank = 0:
