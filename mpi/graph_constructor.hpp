@@ -372,7 +372,7 @@ struct DegreeCalculation {
     BLOCK_SIZE = 1 << LOG_BLOCK_SIZE,
   };
 
-  const size_t DWIDE_ROW_DATA_FIXED_SIZE = 20 * (1ull << 30);  // 20GiB
+  const size_t DWIDE_ROW_DATA_FIXED_SIZE = 32 * (1ull << 30);  // 32GiB
 
   int org_local_bits_;
   int log_local_verts_unit_;
