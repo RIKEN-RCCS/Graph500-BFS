@@ -542,6 +542,7 @@ struct DegreeCalculation {
 
   LocalVertex* calc_degree(int64_t* degree) {
     if (mpi.isMaster()) print_with_prefix("Counting degree.");
+    INDEXED_BFS_LOG_RSS();
 
     int64_t num_verts = num_orig_local_verts();
     vertexes_ = static_cast<LocalVertex*>(
@@ -1284,6 +1285,7 @@ class GraphConstructor2DCSR {
 
       if (mpi.isMaster())
         print_with_prefix("Iteration %d finished.", loop_count);
+      INDEXED_BFS_LOG_RSS();
     }
     edge_list->endRead();
     MPI_Free_mem(edges_to_send);
