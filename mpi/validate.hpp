@@ -1060,8 +1060,7 @@ class BfsValidation {
           }
 #pragma omp parallel for
           for (i = i_start; i < i_end; ++i) {
-            if (get_pred_from_pred_entry(pred[i]) >= 0 &&
-                get_depth_from_pred_entry(pred[i]) == UINT16_MAX) {
+            if (pred[i] != -1) {
               add_gather_request(pred_win, i - i_start, pred_owner[i - i_start],
                                  pred_local[i - i_start], i - i_start);
             } else {
