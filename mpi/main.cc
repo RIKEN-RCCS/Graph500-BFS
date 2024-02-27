@@ -624,6 +624,10 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
       }
     } else {  // validation_level == 0
       edge_visit_count = pf_nedge[SCALE];
+      if (mpi.isMaster()) {
+        print_with_prefix("Sleep 10s");
+      }
+      std::this_thread::sleep_for(std::chrono::seconds(10));
     }
 
     validate_times[i] = MPI_Wtime() - validate_times[i];
