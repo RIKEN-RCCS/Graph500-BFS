@@ -197,6 +197,24 @@ public:
   }
 
   //
+  // Decompress the parent array and callback for each element in parallel.
+  //
+  template <typename F> void for_each_parallel(F f) const {
+#pragma omp parallel for
+    for (size_t i_meta = 0; i_meta < metas_.size(); ++i_meta) {
+      auto *const m = &metas_[i_meta];
+      size_t i_parent = m->prefix_sum;
+
+      for (const size_t bit_pos : bit::iterate_ones(m->contains)) {
+        const vertex child = make_vertex_from(i_meta * word_bits + bit_pos);
+        const global_vertex parent(parents_[i_parent].get());
+        f(child, parent);
+        ++i_parent;
+      }
+    }
+  }
+
+  //
   // Decompress the parent array into a simple array in parallel.
   //
   void dump(global_vertex *const parents) const {

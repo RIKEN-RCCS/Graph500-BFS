@@ -686,7 +686,7 @@ class BfsValidation {
     if (corebfs_enabled) {
       // Create a vertex depth map to use for later validation since CoreBFS
       // does not provide depths of tree vertices.
-      error_counts += build_bfs_depth_map(root, pred);
+      error_counts += build_bfs_depth_map(root, false, pred);
     } else {
       error_counts += check_bfs_depth_map_using_predecessors(root, pred);
     }
@@ -1008,7 +1008,8 @@ class BfsValidation {
   /* Use the predecessors in the given map to write the BFS levels to the high
    * 16 bits of each element in pred; this also catches some problems in pred
    * itself.  Returns true if the predecessor map is valid. */
-  int64_t build_bfs_depth_map(const int64_t root, int64_t* const pred) {
+  int64_t build_bfs_depth_map(const int64_t root, const bool clear_depth,
+                              int64_t* const pred) {
     (void)nglobalverts;
     int64_t error_counts = 0;
     int root_owner = vertex_owner(root);
@@ -1016,13 +1017,13 @@ class BfsValidation {
     int root_is_mine = (root_owner == mpi.rank_2d);
     if (root_is_mine) assert(root_local < nlocalverts);
 
-    {
-      ptrdiff_t i;
+    if (clear_depth) {
 #pragma omp parallel for
-      for (i = 0; i < (ptrdiff_t)nlocalverts; ++i)
+      for (ptrdiff_t i = 0; i < (ptrdiff_t)nlocalverts; ++i)
         write_pred_entry_depth(&pred[i], UINT16_MAX);
-      if (root_is_mine) write_pred_entry_depth(&pred[root_local], 0);
     }
+    if (root_is_mine) write_pred_entry_depth(&pred[root_local], 0);
+
     int64_t* restrict pred_pred = (int64_t*)xMPI_Alloc_mem(
         std::min(chunksize_, nlocalverts) *
         sizeof(int64_t)); /* Predecessor info of predecessor vertex for each
@@ -1057,7 +1058,8 @@ class BfsValidation {
           }
 #pragma omp parallel for
           for (i = i_start; i < i_end; ++i) {
-            if (pred[i] != -1) {
+            if (get_pred_from_pred_entry(pred[i]) >= 0 &&
+                get_depth_from_pred_entry(pred[i]) == UINT16_MAX) {
               add_gather_request(pred_win, i - i_start, pred_owner[i - i_start],
                                  pred_local[i - i_start], i - i_start);
             } else {

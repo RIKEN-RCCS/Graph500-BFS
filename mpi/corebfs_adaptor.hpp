@@ -46,6 +46,8 @@ using util::types::to_unsig;
 
 using edge_storage = EdgeListStorage<UnweightedPackedEdge>;
 
+constexpr uint16_t level_inf = 0xffff;
+
 static void print_log(const log::record &r) {
   const char *const sev = log::severity_string(r.severity);
   print_with_prefix("%-5s [%s@%d] %s", sev, r.function, r.line, r.message);
@@ -75,6 +77,12 @@ static UnweightedPackedEdge make_unweighted_packed_edge(const yoo &d,
 //
 static global_vertex get_pred_from_pred_entry(const int64_t pred_entry) {
   return global_vertex{(pred_entry << 16) >> 16};
+}
+
+static int64_t make_pred_entry(const global_vertex parent, const size_t level) {
+  assert(level <= level_inf);
+  return (static_cast<int64_t>(level & 0xffff) << 48) |
+         (parent.t & 0xffffffffffff);
 }
 
 static std::vector<edge_2d> distribute(const yoo &d, edge_storage *const stor) {
@@ -230,7 +238,7 @@ class corebfs_index : types::noncopyable {
     LOG_I << "Highest-degree vertex: " << root_global;
 
     int64_t auto_tuning_data[AUTO_NUM];  // Not used
-    bfs->run_bfs_core(root_global, pred, edge_factor, alpha, beta,
+    bfs->run_bfs_core(root_global, 0, pred, edge_factor, alpha, beta,
                       auto_tuning_data);
     bfs->get_pred(pred);
 
@@ -248,29 +256,32 @@ class corebfs_index : types::noncopyable {
   //
   // Traverse the tree part of the graph, correcting parents of tree vertices.
   //
-  // This function returns `(core_root, [(u, parent)])`, where
+  // This function returns `(core_root, level, [(u, pred_entry)])`, where
   // - `core_root` is the core vertex closest to `root`,
+  // - `level` is the distance of `core_root` from `root`,
   // - `u` is a local tree vertex that has a parent differs from that in
   //   `tree_parents`, and
-  // - `parent` is the parent of `u`.
+  // - `pred_entry` is packed data of the level and parent of `u`.
   //
-  // `[(u, parent)]` would be empty on most of the ranks because a path from
+  // `[(u, pred_entry)]` would be empty on most of the ranks because a path from
   // `root` to the 2-core is expected to be short (<10 even for SCALE 43).
   //
-  std::pair<int64_t, std::vector<std::pair<uint32_t, int64_t>>> bfs_tree(
-      const global_vertex_int root) const {
+  std::tuple<int64_t, size_t, std::vector<std::pair<uint32_t, int64_t>>>
+  bfs_tree(const global_vertex_int root) const {
     INDEXED_BFS_TIMED_SCOPE(nullptr);
 
     // No reservation because it remains empty in most cases
     std::vector<std::pair<uint32_t, int64_t>> path;
 
-    const global_vertex core_root = corebfs::bfs_tree_with_callback(
+    global_vertex core_root;
+    size_t core_root_lv;
+    std::tie(core_root, core_root_lv) = corebfs::bfs_tree_with_callback(
         dist_, tree_parents_, global_vertex(root),
-        [&](vertex u, global_vertex parent) {
-          path.push_back(std::make_pair(u.t, parent.t));
+        [&](vertex u, global_vertex parent, size_t lv) {
+          path.push_back(std::make_pair(u.t, make_pred_entry(parent, lv)));
         });
 
-    return std::make_pair(core_root.t, std::move(path));
+    return std::make_tuple(core_root.t, core_root_lv, std::move(path));
   }
 
   //
@@ -285,7 +296,9 @@ class corebfs_index : types::noncopyable {
     // parent IDs although it is actually a concatenation of 16-bit depth and
     // 48-bit parent ID. As a result, the depth parts of all the element become
     // zero. The depths need to be computed in the validation phase.
-    tree_parents_.dump(reinterpret_cast<global_vertex *>(pred));
+    tree_parents_.for_each_parallel([&](vertex u, global_vertex parent) {
+      pred[u.t] = make_pred_entry(parent, level_inf);
+    });
 
     for (const auto &p : path_to_core) {
       pred[p.first] = p.second;
