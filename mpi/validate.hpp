@@ -1010,6 +1010,8 @@ class BfsValidation {
    * itself.  Returns true if the predecessor map is valid. */
   int64_t build_bfs_depth_map(const int64_t root, const bool clear_depth,
                               int64_t* const pred) {
+    INDEXED_BFS_TIMED_SCOPE(nullptr);
+
     (void)nglobalverts;
     int64_t error_counts = 0;
     int root_owner = vertex_owner(root);
