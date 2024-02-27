@@ -871,9 +871,19 @@ class BfsValidation {
               ++edge_visit_count;
             }
             if (get_pred_from_pred_entry(edge_preds[i * 2 + 0]) == tgt) {
+              if (error_counts + 1 < MAX_OUTPUT &&
+                  !check_pred_depth(edge_data[i], edge_preds[i * 2 + 0],
+                                    edge_preds[i * 2 + 1])) {
+                __sync_fetch_and_add(&error_counts, 1);
+              }
               (count_r[vertex_owner_c(src)])++;
             }
             if (get_pred_from_pred_entry(edge_preds[i * 2 + 1]) == src) {
+              if (error_counts + 1 < MAX_OUTPUT &&
+                  !check_pred_depth(edge_data[i], edge_preds[i * 2 + 0],
+                                    edge_preds[i * 2 + 1])) {
+                __sync_fetch_and_add(&error_counts, 1);
+              }
               (count_c[vertex_owner_r(tgt)])++;
             }
           }  // #pragma omp for (there is implicit barrier on exit)
@@ -1005,6 +1015,25 @@ class BfsValidation {
     return error_counts;
   }
 
+  bool check_pred_depth(const UnweightedPackedEdge& e,
+                        const int64_t pred_entry0, const int64_t pred_entry1) {
+    const int64_t p0 = get_pred_from_pred_entry(pred_entry0);
+    const int64_t p1 = get_pred_from_pred_entry(pred_entry1);
+    const uint16_t d0 = get_depth_from_pred_entry(pred_entry0);
+    const uint16_t d1 = get_depth_from_pred_entry(pred_entry1);
+
+    if (e.v0() != e.v1() && ((p0 == e.v1() && d1 + 1 != d0) || (p1 == e.v0() && d0 + 1 != d1))) {
+      print_with_prefix(
+          "Validation error: BFS predecessors do not form a tree; see "
+          "vertices %" PRId64 " (pred %" PRIu64 ", depth %" PRIu16 ") and %" PRId64
+          " (pred %" PRIu64 ", depth %" PRIu16 ").",
+          e.v0(), p0, d0, e.v1(), p1, d1);
+      return false;
+    } else {
+      return true;
+    }
+  }
+
   /* Use the predecessors in the given map to write the BFS levels to the high
    * 16 bits of each element in pred; this also catches some problems in pred
    * itself.  Returns true if the predecessor map is valid. */
@@ -1060,7 +1089,8 @@ class BfsValidation {
           }
 #pragma omp parallel for
           for (i = i_start; i < i_end; ++i) {
-            if (pred[i] != -1) {
+            if (get_pred_from_pred_entry(pred[i]) >= 0 &&
+                get_depth_from_pred_entry(pred[i]) == UINT16_MAX) {
               add_gather_request(pred_win, i - i_start, pred_owner[i - i_start],
                                  pred_local[i - i_start], i - i_start);
             } else {
