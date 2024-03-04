@@ -812,6 +812,11 @@ int main(int argc, char **argv) {
     validation_level = 2;
     pre_exec = true;
   }
+  if (root_start != 0 && auto_tuning_enabled){
+    // Please refer to #37
+    // https://github.com/RIKEN-RCCS/Graph500-BFS-private/issues/37
+    ERROR("-s and -A are not available at the same time.\n");
+  }
 
   setup_globals(argc, argv, scale, edge_factor);
   graph500_bfs(scale, edge_factor, alpha, beta, num_bfs_roots, root_start,
