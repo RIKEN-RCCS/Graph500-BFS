@@ -1516,6 +1516,32 @@ class GraphConstructor2DCSR {
     free(src_vertexes_);
     src_vertexes_ = NULL;
 
+#if 1
+    // print low degree vertices for Multi Level Bitmap
+    std::vector<int64_t> num_edge_count(10);
+#pragma omp parallel for
+    for (int64_t non_zero_idx = 0; non_zero_idx < non_zero_rows; ++non_zero_idx) {
+      int64_t e_start = row_starts[non_zero_idx];
+      int64_t e_end = row_starts[non_zero_idx + 1];
+      int64_t num_edges = e_end - e_start;
+      if(num_edges < (int64_t)num_edge_count.size()) {
+        __sync_fetch_and_add(&num_edge_count[num_edges], 1);
+      }
+    }
+    if(num_edge_count[0] != 0) {
+      print_with_prefix("num_edge_count[0] != 0");
+    }
+    num_edge_count[0] = non_zero_rows;
+    std::vector<int64_t> sum_edge_count(10);
+    MPI_Reduce(num_edge_count.data(), sum_edge_count.data(), (int)num_edge_count.size(), 
+      MpiTypeOf<int64_t>::type, MPI_SUM, 0, mpi.comm_2d);
+    if(mpi.isMaster()) {
+      for(int i = 0; i < (int)sum_edge_count.size(); ++i) {
+        print_with_prefix("ROW_COUNTS[0] = %ld", sum_edge_count[i]);
+      }
+    }
+#endif
+
     g.row_starts_ = row_starts;
 #if COMPRESS_ROW_STARTS
     g.sub_row_map_.row_bitmap_ = sub_row_bitmap;
