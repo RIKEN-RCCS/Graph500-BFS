@@ -15,6 +15,7 @@
 
 // Block include of "make_graph.h" since it generates link errors
 #define MAKE_GRAPH_H
+#define INDEXED_BFS_NO_EDGE_GENERATION
 #include "indexed_bfs/bfs/corebfs.hpp"
 
 #pragma GCC diagnostic pop
