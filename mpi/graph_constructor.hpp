@@ -1417,6 +1417,45 @@ class GraphConstructor2DCSR {
     if (mpi.isMaster()) print_with_prefix("Finished compacting edge array.");
   }
 
+  // Counts and prints the number of low-degree vertices, particularly for
+  // calculating the memory size saved by multilevel bitmap compression.
+  void printLowDegreeVertexCounts(
+    const int64_t non_zero_rows,
+    const int64_t* const row_starts
+  ) {
+    std::vector<int64_t> num_edge_count(10);
+#pragma omp parallel for
+    for (int64_t non_zero_idx = 0; non_zero_idx < non_zero_rows;
+         ++non_zero_idx) {
+      int64_t e_start = row_starts[non_zero_idx];
+      int64_t e_end = row_starts[non_zero_idx + 1];
+      int64_t num_edges = e_end - e_start;
+      if(num_edges < (int64_t)num_edge_count.size()) {
+        __sync_fetch_and_add(&num_edge_count[num_edges], 1);
+      }
+    }
+    if(num_edge_count[0] != 0) {
+      // `num_edge_count` should be 0 because reordering eliminates them
+      // (but group reordering leaves some of them, doesn't it?)
+      print_with_prefix("num_edge_count[0] != 0");
+    }
+    // Exploit `num_edge_count[0]` to sum up the number of vertices
+    num_edge_count[0] = non_zero_rows;
+    std::vector<int64_t> sum_edge_count(10);
+    MPI_Reduce(num_edge_count.data(), sum_edge_count.data(),
+               (int)num_edge_count.size(), MpiTypeOf<int64_t>::type, MPI_SUM,
+               0, mpi.comm_2d);
+    if(mpi.isMaster()) {
+      for(int i = 0; i < (int)sum_edge_count.size(); ++i) {
+        if (i >= 1) {
+          sum_edge_count[i] = sum_edge_count[i - 1] - sum_edge_count[i];
+        }
+        print_with_prefix("#Vertices with more than %d neighbors: %ld", i,
+                          sum_edge_count[i]);
+      }
+    }
+  }
+
   void constructFromWideCSR(GraphType& g) {
     TRACER(form_csr);
     const int64_t num_local_verts = g.num_local_verts_;
@@ -1516,31 +1555,9 @@ class GraphConstructor2DCSR {
     free(src_vertexes_);
     src_vertexes_ = NULL;
 
-#if 1
-    // print low degree vertices for Multi Level Bitmap
-    std::vector<int64_t> num_edge_count(10);
-#pragma omp parallel for
-    for (int64_t non_zero_idx = 0; non_zero_idx < non_zero_rows; ++non_zero_idx) {
-      int64_t e_start = row_starts[non_zero_idx];
-      int64_t e_end = row_starts[non_zero_idx + 1];
-      int64_t num_edges = e_end - e_start;
-      if(num_edges < (int64_t)num_edge_count.size()) {
-        __sync_fetch_and_add(&num_edge_count[num_edges], 1);
-      }
-    }
-    if(num_edge_count[0] != 0) {
-      print_with_prefix("num_edge_count[0] != 0");
-    }
-    num_edge_count[0] = non_zero_rows;
-    std::vector<int64_t> sum_edge_count(10);
-    MPI_Reduce(num_edge_count.data(), sum_edge_count.data(), (int)num_edge_count.size(), 
-      MpiTypeOf<int64_t>::type, MPI_SUM, 0, mpi.comm_2d);
-    if(mpi.isMaster()) {
-      for(int i = 0; i < (int)sum_edge_count.size(); ++i) {
-        print_with_prefix("ROW_COUNTS[0] = %ld", sum_edge_count[i]);
-      }
-    }
-#endif
+#if VERVOSE_MODE
+    printLowDegreeVertexCounts(non_zero_rows, row_starts);
+#endif // #if VERVOSE_MODE
 
     g.row_starts_ = row_starts;
 #if COMPRESS_ROW_STARTS
