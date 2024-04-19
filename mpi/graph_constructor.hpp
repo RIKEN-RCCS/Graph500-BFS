@@ -372,7 +372,11 @@ struct DegreeCalculation {
     BLOCK_SIZE = 1 << LOG_BLOCK_SIZE,
   };
 
+#ifdef __FUJITSU // On Fugaku
   const size_t DWIDE_ROW_DATA_FIXED_SIZE = 32 * (1ull << 30);  // 32GiB
+#else
+  const size_t DWIDE_ROW_DATA_FIXED_SIZE = sizeof(DWideRowEdge);
+#endif
 
   int org_local_bits_;
   int log_local_verts_unit_;
@@ -502,7 +506,12 @@ struct DegreeCalculation {
     // check out-of-bounds
     if (cur_offset[num_rows_] * sizeof(DWideRowEdge) >
         DWIDE_ROW_DATA_FIXED_SIZE) {
+#ifdef __FUJITSU
+      // Realloc is not expected on Fugaku
       print_with_prefix("dwide_row_data_: found out-of-bounds");
+#endif
+      dwide_row_data_ = static_cast<DWideRowEdge*>(std::realloc(
+          dwide_row_data_, cur_offset[num_rows_] * sizeof(DWideRowEdge)));
     }
 
     // store data
