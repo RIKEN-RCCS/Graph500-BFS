@@ -124,14 +124,14 @@ class BfsBase {
     int log_local_verts_unit =
         get_msb_index(std::max<int>(BFELL_SORT, NBPE) * 8);
     detail::GraphConstructor2DCSR<EdgeList> constructor;
-
+    const int64_t n_edges = (int64_t(1) << scale) * edgefactor / mpi.size_2d;
     if (!corebfs_enabled) {
-      constructor.construct(edge_list, log_local_verts_unit, graph_);
+      constructor.construct(n_edges, edge_list, log_local_verts_unit, graph_);
       return;
     }
 
     // Create temporary EdgeListStrorage for storing core edges
-    const int64_t n_edges = (int64_t(1) << scale) * edgefactor / mpi.size_2d;
+
     std::string path;
     const char* path_ptr = nullptr;
     if (getenv("TMPFILE") != nullptr) {
@@ -141,7 +141,7 @@ class BfsBase {
     EdgeListStorage<UnweightedPackedEdge> core_edge_list(n_edges, path_ptr);
 
     corebfs_ = corebfs_adaptor::preprocess(scale, edge_list, &core_edge_list);
-    constructor.construct(&core_edge_list, log_local_verts_unit, graph_);
+    constructor.construct(n_edges, &core_edge_list, log_local_verts_unit, graph_);
   }
 
   void prepare_bfs(int validation_level, bool pre_exec, bool real_benchmark,

@@ -412,6 +412,10 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
   double generation_time = MPI_Wtime();
   generate_graph_spec2010(&edge_list, SCALE, edgefactor);
   generation_time = MPI_Wtime() - generation_time;
+  if (mpi.isMaster()) print_with_prefix("Redistributing edge list...");
+  double redistribution_time = MPI_Wtime();
+  redistribute_edge_2d(&edge_list);
+  redistribution_time = MPI_Wtime() - redistribution_time;
 
   if (mpi.isMaster()) print_with_prefix("Graph construction");
   // Create BFS instance and the *COMMUNICATION THREAD*.
@@ -420,10 +424,6 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
   benchmark->construct(SCALE, edgefactor, corebfs_enabled, &edge_list);
   construction_time = MPI_Wtime() - construction_time;
 
-  if (mpi.isMaster()) print_with_prefix("Redistributing edge list...");
-  double redistribution_time = MPI_Wtime();
-  redistribute_edge_2d(&edge_list);
-  redistribution_time = MPI_Wtime() - redistribution_time;
 
   int64_t bfs_roots[num_bfs_roots];
   const int64_t max_used_vertex = find_max_used_vertex(benchmark->graph_);

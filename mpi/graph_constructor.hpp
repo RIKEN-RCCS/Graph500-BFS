@@ -976,13 +976,25 @@ class GraphConstructor2DCSR {
     }
   }
 
-  void construct(EdgeList* edge_list, int log_local_verts_unit, GraphType& g) {
+  void construct(int n_edges, EdgeList* edge_list, int log_local_verts_unit, GraphType& g) {
     TRACER(construction);
     log_local_verts_unit_ =
         std::max<int>(log_local_verts_unit, LOG_EDGE_PART_SIZE);
     g.log_orig_global_verts_ = 0;
 
+    // edge_listのv0とv1を入れ替えたreverse_edge_listを作成
+    std::string path;
+    const char* path_ptr = nullptr;
+    if (getenv("TMPFILE") != nullptr) {
+      path = path + getenv("TMPFILE") + "-reverse";
+      path_ptr = path.c_str();
+    }
+    EdgeListStorage<UnweightedPackedEdge> reverse_edge_list(n_edges, path_ptr);
+    makeReverseEdgeList(edge_list, &reverse_edge_list);
     searchMaxVertex(edge_list, g);
+    auto degree = calcDegree(edge_list, g.num_orig_local_verts_);
+    const auto reorder_map = calcReorderMap(degree, g.num_orig_local_verts_);
+    const auto invert_map = calcInvertMap(reorder_map, g.num_orig_local_verts_);
     scatterAndScanEdges(edge_list, g);
     makeWideRowStarts(g);
     scatterAndStore(edge_list, g);
@@ -1050,6 +1062,107 @@ class GraphConstructor2DCSR {
   }
 
  private:
+ std::vector<int64_t> calcDegree(EdgeList* edge_list, int64_t num_local_verts) {
+  // edge_list.v0 と edge_list.v1 で頂点の次数を計算する
+  // 頂点vの次数は、edge_list.v0==v の場合と edge_list.v1==vの場合にカウント
+  // ただし自己ループedge_list.v0 == edge_list.v1 は無視
+
+  auto degree = std::vector<int64_t>(num_local_verts, 0);
+
+  // v0は各行ごとにvertex_owner_c(v0)のプロセスに分配する(vertex_owner(v0)と等価)
+  // v1は各列ごとにvertex_owner_r(v1)のプロセスに分配する(vertex_owner(v1)と等価)
+  ScatterContext scatter_v0(mpi.comm_2dr);
+  ScatterContext scatter_v1(mpi.comm_2dc);
+  int64_t* local_vertex_v0_to_send = static_cast<int64_t*>(
+      xMPI_Alloc_mem(EdgeList::CHUNK_SIZE * sizeof(int64_t)));
+  int64_t* local_vertex_v1_to_send = static_cast<int64_t*>(
+      xMPI_Alloc_mem(EdgeList::CHUNK_SIZE * sizeof(int64_t)));
+
+  int num_loops = edge_list->beginRead(false);
+  for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
+    EdgeType* edge_data;
+    const int edge_data_length = edge_list->read(&edge_data);
+#pragma omp parallel
+    {
+      int* restrict counts_v0 = scatter_v0.get_counts();
+      int* restrict counts_v1 = scatter_v1.get_counts();
+
+#pragma omp for schedule(static)
+      for (int i = 0; i < edge_data_length; ++i) {
+        const int64_t v0 = edge_data[i].v0();
+        const int64_t v1 = edge_data[i].v1();
+        if (v0 == v1) continue;
+        (counts_v0[vertex_owner_c(v0)])++;
+        (counts_v1[vertex_owner_r(v1)])++;
+      }  // #pragma omp for schedule(static)
+
+#pragma omp master
+      {
+        scatter_v0.sum();
+        scatter_v1.sum();
+      }  // #pragma omp master
+#pragma omp barrier
+      ;
+      int* restrict offsets_v0 = scatter_v0.get_offsets();
+      int* restrict offsets_v1 = scatter_v1.get_offsets();
+
+#pragma omp for schedule(static)
+      for (int i = 0; i < edge_data_length; ++i) {
+        const int64_t v0 = edge_data[i].v0();
+        const int64_t v1 = edge_data[i].v1();
+        if (v0 == v1) continue;
+        local_vertex_v0_to_send[(offsets_v0[vertex_owner_c(v0)])++] = vertex_local(v0);
+        local_vertex_v1_to_send[(offsets_v1[vertex_owner_r(v1)])++] = vertex_local(v1);
+      }  // #pragma omp for schedule(static)
+    }  // #pragma omp parallel
+
+    {
+      int64_t* recv_local_vertex_v0 = scatter_v0.scatter(local_vertex_v0_to_send);
+      const int64_t num_recv_local_vertex_v0 = scatter_v0.get_recv_count();
+      for (int64_t i = 0; i < num_recv_local_vertex_v0; ++i) {
+        const int64_t local_v0 = recv_local_vertex_v0[i];
+        degree[local_v0]++;
+      }
+      scatter_v0.free(recv_local_vertex_v0);
+    }
+
+    {
+      int64_t* recv_local_vertex_v1 = scatter_v1.scatter(local_vertex_v1_to_send);
+      const int64_t num_recv_local_vertex_v1 = scatter_v1.get_recv_count();
+      for (int64_t i = 0; i < num_recv_local_vertex_v1; ++i) {
+        const int64_t local_v1 = recv_local_vertex_v1[i];
+        degree[local_v1]++;
+      }
+      scatter_v1.free(recv_local_vertex_v1);
+    }
+    if (mpi.isMaster()) print_with_prefix("Iteration %d finished.", loop_count);
+  }
+  edge_list->endRead();
+  MPI_Free_mem(local_vertex_v0_to_send);
+  MPI_Free_mem(local_vertex_v1_to_send);
+  return degree;
+ }
+
+ std::vector<LocalVertex> calcReorderMap(std::vector<int64_t>& degree, int64_t num_orig_local_verts) {
+    std::vector<LocalVertex> reorder_map(num_orig_local_verts);
+    for (int64_t i = 0; i < num_orig_local_verts; ++i) {
+      reorder_map[i] = i;
+    }
+
+    // sort by degree
+    sort2(degree.data(), reorder_map.data(), num_orig_local_verts, std::greater<int64_t>());
+
+    return reorder_map;
+  }
+
+  std::vector<LocalVertex> calcInvertMap(const std::vector<LocalVertex>& reorder_map, int64_t num_orig_local_verts) {
+    std::vector<LocalVertex> invert_map(num_orig_local_verts);
+    for (int64_t i = 0; i < num_orig_local_verts; ++i) {
+      invert_map[reorder_map[i]] = i;
+    }
+    return invert_map;
+  }
+
   // step1: for computing degree order
   void initializeParameters(int log_max_vertex, int64_t num_global_edges,
                             GraphType& g) {
@@ -1094,6 +1207,71 @@ class GraphConstructor2DCSR {
     delete degree_calc_;
     degree_calc_ = NULL;
     malloc_trim(0);
+  }
+
+  void makeReverseEdgeList(EdgeList* edge_list, EdgeList* reverse_edge_list) {
+  typedef typename EdgeList::edge_type EdgeType;
+  ScatterContext scatter(mpi.comm_2d);
+  EdgeType* edges_to_send = static_cast<EdgeType*>(
+      xMPI_Alloc_mem(EdgeList::CHUNK_SIZE * sizeof(EdgeType)));
+  int num_loops = edge_list->beginRead(false);
+  reverse_edge_list->beginWrite();
+
+  for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
+    EdgeType* edge_data;
+    const int edge_data_length = edge_list->read(&edge_data);
+
+#pragma omp parallel
+    {
+      int* restrict counts = scatter.get_counts();
+
+#pragma omp for schedule(static)
+      for (int i = 0; i < edge_data_length; ++i) {
+        // reverse edge
+        const int64_t v1 = edge_data[i].v0();
+        const int64_t v0 = edge_data[i].v1();
+        (counts[edge_owner(v0, v1)])++;
+      }  // #pragma omp for schedule(static)
+
+#pragma omp master
+      {
+        scatter.sum();
+      }  // #pragma omp master
+#pragma omp barrier
+      ;
+      int* restrict offsets = scatter.get_offsets();
+
+#pragma omp for schedule(static)
+      for (int i = 0; i < edge_data_length; ++i) {
+        // reverse edge
+        const int64_t v1 = edge_data[i].v0();
+        const int64_t v0 = edge_data[i].v1();
+        // assert (offsets[edge_owner(v0,v1)] < 2 * FILE_CHUNKSIZE);
+        edges_to_send[(offsets[edge_owner(v0, v1)])++].set(v0, v1);
+      }  // #pragma omp for schedule(static)
+    }  // #pragma omp parallel
+
+    EdgeType* recv_edges = scatter.scatter(edges_to_send);
+    const int64_t num_recv_edges = scatter.get_recv_count();
+#ifndef NDEBUG
+    for (int64_t i = 0; i < num_recv_edges; ++i) {
+      const int64_t v0 = recv_edges[i].v0();
+      const int64_t v1 = recv_edges[i].v1();
+      assert(vertex_owner_r(v0) == mpi.rank_2dr);
+      assert(vertex_owner_c(v1) == mpi.rank_2dc);
+    }
+#undef VERTEX_OWNER_R
+#undef VERTEX_OWNER_C
+#endif
+    reverse_edge_list->write(recv_edges, num_recv_edges);
+    scatter.free(recv_edges);
+
+    if (mpi.isMaster()) print_with_prefix("Iteration %d finished.", loop_count);
+  }
+  reverse_edge_list->endWrite();
+  edge_list->endRead();
+  MPI_Free_mem(edges_to_send);
+
   }
 
   // function #1
