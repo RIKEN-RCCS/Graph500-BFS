@@ -733,7 +733,8 @@ struct DegreeCalculation {
   void make_construct_data(LocalVertex* reorder_map) {
     int64_t src_bitmap_size = local_bitmap_size() * mpi.size_2dc;
     int64_t num_wide_rows = local_wide_row_size() * mpi.size_2dc;
-
+    auto ofs = std::ofstream("data/num_wide_rows_debug_expect" +
+                             std::to_string(mpi.rank_2d) + ".txt");
     // allocate 1
     row_bitmap_ = static_cast<BitmapType*>(
         cache_aligned_xcalloc(src_bitmap_size * sizeof(BitmapType)));
@@ -768,6 +769,9 @@ struct DegreeCalculation {
 
             int64_t wide_row_offset =
                 local_wide_row_size() * c + (reordered >> LOG_EDGE_PART_SIZE);
+            if (mpi.isMaster() && wide_row_offset == 0) {
+              ofs << local << std::endl;
+            }
             counts[wide_row_offset]++;
 
             BitmapType& bitmap_v =
@@ -976,7 +980,8 @@ class GraphConstructor2DCSR {
     }
   }
 
-  void construct(int n_edges, EdgeList* edge_list, int log_local_verts_unit, GraphType& g) {
+  void construct(int n_edges, EdgeList* edge_list, int log_local_verts_unit,
+                 GraphType& g) {
     TRACER(construction);
     log_local_verts_unit_ =
         std::max<int>(log_local_verts_unit, LOG_EDGE_PART_SIZE);
@@ -991,12 +996,128 @@ class GraphConstructor2DCSR {
     }
     EdgeListStorage<UnweightedPackedEdge> reverse_edge_list(n_edges, path_ptr);
     makeReverseEdgeList(edge_list, &reverse_edge_list);
+    {
+      std::ofstream ofs("data/edge_list" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      int num_loops = edge_list->beginRead(false);
+      for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
+        UnweightedPackedEdge* edge_data;
+        const int bufsize = edge_list->read(&edge_data);
+        for (int i = 0; i < bufsize; ++i) {
+          int64_t v0 = edge_data[i].v0();
+          int64_t v1 = edge_data[i].v1();
+          ofs << v0 << " " << v1 << std::endl;
+        }
+      }
+      edge_list->endRead();
+      ofs.close();
+    }
+    {
+      std::ofstream ofs("data/reverse_edge_list" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      int num_loops = reverse_edge_list.beginRead(false);
+      for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
+        UnweightedPackedEdge* edge_data;
+        const int bufsize = reverse_edge_list.read(&edge_data);
+        for (int i = 0; i < bufsize; ++i) {
+          int64_t v0 = edge_data[i].v0();
+          int64_t v1 = edge_data[i].v1();
+          ofs << v0 << " " << v1 << std::endl;
+        }
+      }
+      reverse_edge_list.endRead();
+      ofs.close();
+    }
     searchMaxVertex(edge_list, g);
-    auto degree = calcDegree(edge_list, g.num_orig_local_verts_);
-    const auto reorder_map = calcReorderMap(degree, g.num_orig_local_verts_);
-    const auto invert_map = calcInvertMap(reorder_map, g.num_orig_local_verts_);
+    // auto degree = calcDegree(edge_list, g.num_orig_local_verts_);
+    auto degree =
+        calcDegree(edge_list, &reverse_edge_list, g.num_orig_local_verts_);
+    {
+      std::ofstream ofs("data/degree" + std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0; i < g.num_orig_local_verts_; ++i) {
+        ofs << i << " " << degree[i] << std::endl;
+      }
+      ofs.close();
+    }
+    auto [reorder_map, invert_map] =
+        calcReorderMapAndInvertMap(degree, g.num_orig_local_verts_);
+    local_bits_ = get_msb_index(max_local_verts_ - 1) + 1;
+
+    if (mpi.isMaster()) print_with_prefix("local_bits: %d", local_bits_);
+
+    {
+      std::ofstream ofs("data/reorder_map" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < g.num_orig_local_verts_; ++i) {
+        ofs << i << " " << reorder_map[i] << std::endl;
+      }
+      ofs.close();
+    }
+    {
+      std::ofstream ofs("data/invert_map" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < g.num_orig_local_verts_; ++i) {
+        ofs << i << " " << invert_map[i] << std::endl;
+      }
+      ofs.close();
+    }
+
+    {
+      std::ofstream ofs("data/sorted_degree" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < g.num_orig_local_verts_; ++i) {
+        ofs << i << " " << degree[i] << std::endl;
+      }
+      ofs.close();
+    }
+
+    auto wide_row_starts =
+        calcWideRowStarts(edge_list, &reverse_edge_list, reorder_map.data(),
+                          degree, max_local_verts_);
+    {
+      std::ofstream ofs("data/wide_row_starts" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < wide_row_starts.size(); ++i) {
+        ofs << i << " " << wide_row_starts[i] << std::endl;
+      }
+      ofs.close();
+    }
+
     scatterAndScanEdges(edge_list, g);
     makeWideRowStarts(g);
+    // dump file g.degree_ for debugging per mpi rank
+    {
+      std::ofstream ofs("data/degree_expect" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < g.num_orig_local_verts_; ++i) {
+        ofs << i << " " << g.degree_[i] << std::endl;
+      }
+      ofs.close();
+    }
+    {
+      std::ofstream ofs("data/reorder_expect" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < g.num_orig_local_verts_; ++i) {
+        ofs << i << " " << g.reorder_map_[i] << std::endl;
+      }
+      ofs.close();
+    }
+    {
+      std::ofstream ofs("data/invert_expect" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < g.num_orig_local_verts_; ++i) {
+        ofs << i << " " << g.invert_map_[i] << std::endl;
+      }
+      ofs.close();
+    }
+    {
+      std::ofstream ofs("data/wide_row_starts_expect" +
+                        std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0; i < num_wide_rows_ + 1; ++i) {
+        ofs << i << " " << wide_row_starts_[i] << std::endl;
+      }
+    }
+
     scatterAndStore(edge_list, g);
     sortEdges(g);
     if (row_starts_sup_ != NULL) {
@@ -1011,6 +1132,324 @@ class GraphConstructor2DCSR {
     computeNumVertices(g);
 
     if (mpi.isMaster()) print_with_prefix("Graph construction complete.");
+    // {
+    //   const int64_t num_local_verts = g.num_local_verts_;
+    //   const int64_t src_region_length = num_local_verts * mpi.size_2dc;
+    //   const int64_t row_bitmap_length = src_region_length >> LOG_NBPE;
+    //   const int64_t non_zero_rows = g.row_sums_[row_bitmap_length];
+    //   if (mpi.isMaster())
+    //   {
+    //     print_with_prefix("Non zero rows: %d", non_zero_rows);
+    //     print_with_prefix("g.row_starts_[0]: %d", g.row_starts_[0]);
+    //     // std::ofstream ofs("data/row_starts_expect" +
+    //     std::to_string(mpi.rank_2d) + ".txt");
+    //     // for (int64_t i = 0; i < 5; ++i) {
+    //     //     ofs << i << " " << g.row_starts_[i] << std::endl;
+    //     // }
+    //   }
+    // }
+  }
+
+  std::vector<int64_t> calcWideRowStarts(EdgeList* edge_list,
+                                         EdgeList* reverse_edge_list,
+                                         LocalVertex* reorder_map,
+                                         const std::vector<int64_t>& degree,
+                                         int64_t num_local_verts) {
+    const auto num_wide_rows = num_local_verts * mpi.size_2dc / EDGE_PART_SIZE;
+    auto ofs = std::ofstream("data/num_wide_rows_debug" +
+                             std::to_string(mpi.rank_2d) + ".txt");
+
+    if (mpi.isMaster()) {
+      print_with_prefix("EDGE_PART_SIZE: %d", EDGE_PART_SIZE);
+      print_with_prefix("mpi.size_2dc: %d", mpi.size_2dc);
+      print_with_prefix("num_verts: %d", num_local_verts);
+      print_with_prefix("num_wide_rows: %d", num_wide_rows);
+      print_with_prefix("calcWideRowStarts. num_wide_rows = %d", num_wide_rows);
+    }
+    auto wide_row_starts = std::vector<int64_t>(num_wide_rows + 1, 0);
+    // v0の64bitのうちlocal部分とprocess番号に分ける
+    // vertex_owner_c(v0)のプロセスにvertex_local(v0)を送る
+    // reorder_map[vertex_local(v0)]でリオーダー後のIDを取得
+
+    // wide_row_startsをv0に対応するindexをインクリメントして構築する
+
+    const auto calc_wide_row_starts_from_edgelist = [&](EdgeList* edge_list) {
+      // リオーダー後のIDはvertex_owner(v0)のプロセスに問い合わせる
+      ScatterContext scatter(mpi.comm_2dr);
+      int64_t* local_vertex_to_send = static_cast<int64_t*>(
+          xMPI_Alloc_mem(EdgeList::CHUNK_SIZE * sizeof(int64_t)));
+      int num_loops = edge_list->beginRead(false);
+      for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
+        EdgeType* edge_data;
+        const int edge_data_length = edge_list->read(&edge_data);
+        int* restrict local_indices = static_cast<int*>(
+            cache_aligned_xmalloc(edge_data_length * sizeof(int)));
+
+#pragma omp parallel
+        {
+          int* restrict counts = scatter.get_counts();
+
+#pragma omp for schedule(static)
+          for (int i = 0; i < edge_data_length; ++i) {
+            const int64_t v0 = edge_data[i].v0();
+            const int64_t v1 = edge_data[i].v1();
+            if (v0 == v1) continue;
+            (counts[vertex_owner_c(v0)])++;
+          }  // #pragma omp for schedule(static)
+
+#pragma omp master
+          {
+            scatter.sum();
+          }  // #pragma omp master
+#pragma omp barrier
+          ;
+          int* restrict offsets = scatter.get_offsets();
+          std::vector<int> offsets2 =
+              std::vector<int>(offsets, offsets + mpi.size_2dr);
+
+#pragma omp for schedule(static)
+          for (int i = 0; i < edge_data_length; ++i) {
+            const int64_t v0 = edge_data[i].v0();
+            const int64_t v1 = edge_data[i].v1();
+            if (v0 == v1) {
+              continue;
+            }
+            int pos = (offsets[vertex_owner_c(v0)])++;
+            local_indices[i] = pos;
+            local_vertex_to_send[pos] = vertex_local(v0);
+          }  // #pragma omp for schedule(static)
+        }  // #pragma omp parallel
+        {
+          int64_t* recv_vertex_local = scatter.scatter(local_vertex_to_send);
+          const int num_recv_vertex_local = scatter.get_recv_count();
+          LocalVertex* send_reorder_id = static_cast<LocalVertex*>(
+              xMPI_Alloc_mem(num_recv_vertex_local * sizeof(LocalVertex)));
+          for (int i = 0; i < num_recv_vertex_local; ++i) {
+#ifdef SMALL_REORDER_BIT
+            send_reorder_id[i] = (recv_vertex_local[i] >> reorder_bits_) *
+                                     max_local_group_verts_ +
+                                 reorder_map[recv_vertex_local[i]];
+#else
+            send_reorder_id[i] = reorder_map[recv_vertex_local[i]];
+#endif
+            if (mpi.isMaster() && recv_vertex_local[i] == 119548) {
+              std::cout << "i:" << i << std::endl;
+              std::cout << "send_reorder_id:" << send_reorder_id[i]
+                        << std::endl;
+            }
+          }
+
+          LocalVertex* recv_reorder_id = scatter.gather(send_reorder_id);
+          for (int i = 0; i < edge_data_length; ++i) {
+            int64_t v0 = edge_data[i].v0();
+            int64_t v1 = edge_data[i].v1();
+            if (v0 == v1) continue;
+            int64_t wide_row_idx_v0 =
+                (max_local_verts_ / EDGE_PART_SIZE) * vertex_owner_c(v0) +
+                (recv_reorder_id[local_indices[i]] >> LOG_EDGE_PART_SIZE);
+            if (mpi.isMaster() && wide_row_idx_v0 == 0) {
+              ofs << vertex_local(v0) << std::endl;
+            }
+            if (mpi.isMaster() && wide_row_idx_v0 == 0 &&
+                vertex_local(v0) == 119548) {
+              std::cout << "v0:" << v0 << " v1:" << v1 << std::endl;
+              std::cout << "recv_reorder_id:"
+                        << recv_reorder_id[local_indices[i]] << std::endl;
+              std::cout << "vertex_owner_c(v0):" << vertex_owner_c(v0)
+                        << std::endl;
+              std::cout << "max_local_verts_:" << max_local_verts_ << std::endl;
+              std::cout << "EDGE_PART_SIZE:" << EDGE_PART_SIZE << std::endl;
+              std::cout << "wide_row_idx_v0:" << wide_row_idx_v0 << std::endl;
+            }
+            wide_row_starts[wide_row_idx_v0 + 1]++;
+          }
+          scatter.free(recv_vertex_local);
+          scatter.free(recv_reorder_id);
+        }
+      }
+      edge_list->endRead();
+      MPI_Free_mem(local_vertex_to_send);
+    };
+    // 1. 順方向のエッジリストを読み込む
+    calc_wide_row_starts_from_edgelist(edge_list);
+    // 2. 逆方向のエッジリストを読み込む
+    calc_wide_row_starts_from_edgelist(reverse_edge_list);
+
+    // cumsum
+    for (int64_t i = 1; i < wide_row_starts.size(); ++i) {
+      wide_row_starts[i] += wide_row_starts[i - 1];
+    }
+
+    return wide_row_starts;
+  }
+
+  std::tuple<std::vector<LocalVertex>, std::vector<LocalVertex>>
+  calcReorderMapAndInvertMap(std::vector<int64_t>& degree, int64_t num_verts) {
+    if (mpi.isMaster()) print_with_prefix("calcReorderMapAndInvertMap.");
+    std::vector<LocalVertex> invert_map(num_verts);
+
+#ifdef SMALL_REORDER_BIT
+    reorder_bits_ = PRM::INITIAL_LOG_REORDER_UNIT;
+    int64_t reorder_unit = uint32_t(1) << reorder_bits_;
+    uint64_t mask_reorder = reorder_unit - 1;
+
+    int64_t* tmp_degree = static_cast<int64_t*>(
+        cache_aligned_xcalloc(num_verts * sizeof(int64_t)));
+    memcpy(tmp_degree, degree.data(), sizeof(int64_t) * num_verts);
+#endif
+
+    do {
+#if SMALL_REORDER_BIT
+      for (int64_t i = 0; i < num_verts; ++i) {
+        int32_t local_reordered_id = (i & mask_reorder);
+        invert_map[i] = local_reordered_id;
+      }
+#else
+      for (LocalVertex i = 0; i < num_verts; ++i) {
+        invert_map[i] = i;
+      }
+#endif
+
+#if SMALL_REORDER_BIT
+#pragma omp parallel for
+      for (int64_t i = 0;
+           i < std::max((num_verts >> reorder_bits_), int64_t(1)); ++i) {
+        const int64_t begin_offset = i * reorder_unit;
+        const int64_t num_sorting = std::min(reorder_unit, num_verts - i);
+
+#if VERTEX_REORDERING == 2
+        sort2(degree.data() + begin_offset, invert_map.data() + begin_offset,
+              num_sorting, std::greater<int64_t>());
+#elif VERTEX_REORDERING == 1
+        sort2(degree.data() + begin_offset, invert_map.data() + begin_offest,
+              num_sorting, ZeroOrElseComparator<int64_t>());
+#endif
+      }
+#else
+      // sort by degree
+#if VERTEX_REORDERING == 2
+      sort2(degree.data(), invert_map.data(), num_verts,
+            std::greater<int64_t>());
+#elif VERTEX_REORDERING == 1
+      sort2(degree.data(), invert_map.data(), num_verts,
+            ZeroOrElseComparator<int64_t>());
+#endif
+#endif
+
+#if SMALL_REORDER_BIT
+      max_local_group_verts_ = 0;
+      int64_t max_local_groups = 0;
+#pragma omp parallel for reduction(max : max_local_group_verts_, \
+                                       max_local_groups)
+      for (int64_t i = 0; i < num_verts; i += reorder_unit) {
+        int64_t num_loop = std::min(reorder_unit, num_verts - i);
+        int32_t group_max_verts = 0;
+        for (int32_t j = num_loop - 1; j >= 0; --j) {
+          if (degree[i + j] != 0) {
+            group_max_verts = j + 1;
+            break;
+          }
+        }
+
+        if (group_max_verts > 0)
+          max_local_groups =
+              std::max(max_local_groups, (i >> reorder_bits_) + 1);
+
+        max_local_group_verts_ =
+            std::max(max_local_group_verts_, group_max_verts);
+      }
+
+#else
+      max_local_verts_ = 0;
+      for (int64_t i = num_verts - 1; i >= 0; --i) {
+        if (degree[i] != 0) {
+          max_local_verts_ = i + 1;
+          break;
+        }
+      }
+#endif
+
+#if SMALL_REORDER_BIT
+      // roundup
+      int64_t local_verts_unit = int64_t(1) << log_local_verts_unit_;
+      max_local_verts_ =
+          roundup(max_local_group_verts_ * max_local_groups, local_verts_unit);
+      // print_with_prefix("[dump] max_local_verts %d, max_local_groups = %d",
+      // max_local_verts, max_local_groups);
+
+      // get global max
+      MPI_Allreduce(MPI_IN_PLACE, &max_local_verts_, 1,
+                    MpiTypeOf<int64_t>::type, MPI_MAX, mpi.comm_2d);
+      MPI_Allreduce(MPI_IN_PLACE, &max_local_group_verts_, 1,
+                    MpiTypeOf<int32_t>::type, MPI_MAX, mpi.comm_2d);
+
+      if (mpi.isMaster())
+        print_with_prefix(
+            "max_local_verts = %lld, max_local_group_verts = %u, "
+            "max_local_groups = %ld "
+            "local_verts_unit = %lld, reorder_bits = %d",
+            max_local_verts_, max_local_group_verts_, max_local_groups,
+            local_verts_unit, reorder_bits_);
+#else
+      // roundup
+      int64_t local_verts_unit = int64_t(1) << log_local_verts_unit_;
+      max_local_verts_ = roundup(max_local_verts_, local_verts_unit);
+      // get global max
+      MPI_Allreduce(MPI_IN_PLACE, &max_local_verts_, 1,
+                    MpiTypeOf<int64_t>::type, MPI_MAX, mpi.comm_2d);
+#endif
+
+#ifdef SMALL_REORDER_BIT
+      const int edge_array_bits = 48;
+      const int max_reorder_bits = 16;
+      auto prev_reorder_bits = reorder_bits_;
+      int local_bits = get_msb_index(max_local_verts_ - 1) + 1;
+      int r_bits =
+          (mpi.size_2dr == 1) ? 0 : (get_msb_index(mpi.size_2dr - 1) + 1);
+
+      reorder_bits_ =
+          std::min(max_reorder_bits, edge_array_bits - (local_bits + r_bits));
+      reorder_unit = uint32_t(1) << reorder_bits_;
+      mask_reorder = reorder_unit - 1;
+
+      if (reorder_bits_ <= 0) {
+        // this statement occurs when local_bits + r_bits exceeds edge_array
+        // bits(48). can not run BFS
+        throw_exception(
+            "reorder bits is less than equal 0, "
+            "edge_array_bits = %d, local_bits = %d, "
+            "r_bits = %d, reorder_bits = %d",
+            edge_array_bits, local_bits, r_bits, reorder_bits_);
+      }
+      if (prev_reorder_bits == reorder_bits_) break;
+
+      // write back to degree for next loop
+      memcpy(degree.data(), tmp_degree, sizeof(int64_t) * num_verts);
+#else
+      break;
+#endif
+    } while (1);
+
+    std::vector<LocalVertex> reorder_map(num_verts);
+#if SMALL_REORDER_BIT
+#pragma omp parallel for
+    for (int64_t i = 0; i < num_verts; ++i) {
+      int64_t reordered_group_id = (i >> reorder_bits_) * reorder_unit;
+      int32_t local_reordered_id = (i & mask_reorder);
+
+      reorder_map[reordered_group_id + invert_map[i]] =
+          LocalVertex(local_reordered_id);
+    }
+
+    free(tmp_degree);
+#else
+#pragma omp parallel for
+    for (int64_t i = 0; i < num_verts; ++i) {
+      reorder_map[invert_map[i]] = int(i);
+    }
+#endif
+
+    return std::tuple(reorder_map, invert_map);
   }
 
   void copy_to_gpu(GraphType& g, bool graph_on_gpu_) {
@@ -1062,100 +1501,237 @@ class GraphConstructor2DCSR {
   }
 
  private:
- std::vector<int64_t> calcDegree(EdgeList* edge_list, int64_t num_local_verts) {
-  // edge_list.v0 と edge_list.v1 で頂点の次数を計算する
-  // 頂点vの次数は、edge_list.v0==v の場合と edge_list.v1==vの場合にカウント
-  // ただし自己ループedge_list.v0 == edge_list.v1 は無視
+  std::vector<int64_t> calcDegree(EdgeList* edge_list,
+                                  int64_t num_local_verts) {
+    // edge_list.v0 と edge_list.v1 で頂点の次数を計算する
+    // 頂点vの次数は、edge_list.v0==v の場合と edge_list.v1==vの場合にカウント
+    // ただし自己ループedge_list.v0 == edge_list.v1 は無視
 
-  auto degree = std::vector<int64_t>(num_local_verts, 0);
+    auto degree = std::vector<int64_t>(num_local_verts, 0);
 
-  // v0は各行ごとにvertex_owner_c(v0)のプロセスに分配する(vertex_owner(v0)と等価)
-  // v1は各列ごとにvertex_owner_r(v1)のプロセスに分配する(vertex_owner(v1)と等価)
-  ScatterContext scatter_v0(mpi.comm_2dr);
-  ScatterContext scatter_v1(mpi.comm_2dc);
-  int64_t* local_vertex_v0_to_send = static_cast<int64_t*>(
-      xMPI_Alloc_mem(EdgeList::CHUNK_SIZE * sizeof(int64_t)));
-  int64_t* local_vertex_v1_to_send = static_cast<int64_t*>(
-      xMPI_Alloc_mem(EdgeList::CHUNK_SIZE * sizeof(int64_t)));
+    // v0は各行ごとにvertex_owner_c(v0)のプロセスに分配する(vertex_owner(v0)と等価)
+    // v1は各列ごとにvertex_owner_r(v1)のプロセスに分配する(vertex_owner(v1)と等価)
+    ScatterContext scatter_v0(mpi.comm_2dr);
+    ScatterContext scatter_v1(mpi.comm_2dc);
+    int64_t* local_vertex_v0_to_send = static_cast<int64_t*>(
+        xMPI_Alloc_mem(EdgeList::CHUNK_SIZE * sizeof(int64_t)));
+    int64_t* local_vertex_v1_to_send = static_cast<int64_t*>(
+        xMPI_Alloc_mem(EdgeList::CHUNK_SIZE * sizeof(int64_t)));
 
-  int num_loops = edge_list->beginRead(false);
-  for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
-    EdgeType* edge_data;
-    const int edge_data_length = edge_list->read(&edge_data);
+    int num_loops = edge_list->beginRead(false);
+    for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
+      EdgeType* edge_data;
+      const int edge_data_length = edge_list->read(&edge_data);
 #pragma omp parallel
-    {
-      int* restrict counts_v0 = scatter_v0.get_counts();
-      int* restrict counts_v1 = scatter_v1.get_counts();
+      {
+        int* restrict counts_v0 = scatter_v0.get_counts();
+        int* restrict counts_v1 = scatter_v1.get_counts();
 
 #pragma omp for schedule(static)
-      for (int i = 0; i < edge_data_length; ++i) {
-        const int64_t v0 = edge_data[i].v0();
-        const int64_t v1 = edge_data[i].v1();
-        if (v0 == v1) continue;
-        (counts_v0[vertex_owner_c(v0)])++;
-        (counts_v1[vertex_owner_r(v1)])++;
-      }  // #pragma omp for schedule(static)
+        for (int i = 0; i < edge_data_length; ++i) {
+          const int64_t v0 = edge_data[i].v0();
+          const int64_t v1 = edge_data[i].v1();
+          if (v0 == v1) continue;
+          (counts_v0[vertex_owner_c(v0)])++;
+          (counts_v1[vertex_owner_r(v1)])++;
+        }  // #pragma omp for schedule(static)
 
 #pragma omp master
-      {
-        scatter_v0.sum();
-        scatter_v1.sum();
-      }  // #pragma omp master
+        {
+          scatter_v0.sum();
+          scatter_v1.sum();
+        }  // #pragma omp master
 #pragma omp barrier
-      ;
-      int* restrict offsets_v0 = scatter_v0.get_offsets();
-      int* restrict offsets_v1 = scatter_v1.get_offsets();
+        ;
+        int* restrict offsets_v0 = scatter_v0.get_offsets();
+        int* restrict offsets_v1 = scatter_v1.get_offsets();
 
 #pragma omp for schedule(static)
-      for (int i = 0; i < edge_data_length; ++i) {
-        const int64_t v0 = edge_data[i].v0();
-        const int64_t v1 = edge_data[i].v1();
-        if (v0 == v1) continue;
-        local_vertex_v0_to_send[(offsets_v0[vertex_owner_c(v0)])++] = vertex_local(v0);
-        local_vertex_v1_to_send[(offsets_v1[vertex_owner_r(v1)])++] = vertex_local(v1);
-      }  // #pragma omp for schedule(static)
-    }  // #pragma omp parallel
+        for (int i = 0; i < edge_data_length; ++i) {
+          const int64_t v0 = edge_data[i].v0();
+          const int64_t v1 = edge_data[i].v1();
+          if (v0 == v1) continue;
+          local_vertex_v0_to_send[(offsets_v0[vertex_owner_c(v0)])++] =
+              vertex_local(v0);
+          local_vertex_v1_to_send[(offsets_v1[vertex_owner_r(v1)])++] =
+              vertex_local(v1);
+        }  // #pragma omp for schedule(static)
+      }  // #pragma omp parallel
 
-    {
-      int64_t* recv_local_vertex_v0 = scatter_v0.scatter(local_vertex_v0_to_send);
-      const int64_t num_recv_local_vertex_v0 = scatter_v0.get_recv_count();
-      for (int64_t i = 0; i < num_recv_local_vertex_v0; ++i) {
-        const int64_t local_v0 = recv_local_vertex_v0[i];
-        degree[local_v0]++;
+      {
+        int64_t* recv_local_vertex_v0 =
+            scatter_v0.scatter(local_vertex_v0_to_send);
+        const int64_t num_recv_local_vertex_v0 = scatter_v0.get_recv_count();
+        for (int64_t i = 0; i < num_recv_local_vertex_v0; ++i) {
+          const int64_t local_v0 = recv_local_vertex_v0[i];
+          degree[local_v0]++;
+        }
+        scatter_v0.free(recv_local_vertex_v0);
       }
-      scatter_v0.free(recv_local_vertex_v0);
-    }
 
-    {
-      int64_t* recv_local_vertex_v1 = scatter_v1.scatter(local_vertex_v1_to_send);
-      const int64_t num_recv_local_vertex_v1 = scatter_v1.get_recv_count();
-      for (int64_t i = 0; i < num_recv_local_vertex_v1; ++i) {
-        const int64_t local_v1 = recv_local_vertex_v1[i];
-        degree[local_v1]++;
+      {
+        int64_t* recv_local_vertex_v1 =
+            scatter_v1.scatter(local_vertex_v1_to_send);
+        const int64_t num_recv_local_vertex_v1 = scatter_v1.get_recv_count();
+        for (int64_t i = 0; i < num_recv_local_vertex_v1; ++i) {
+          const int64_t local_v1 = recv_local_vertex_v1[i];
+          degree[local_v1]++;
+        }
+        scatter_v1.free(recv_local_vertex_v1);
       }
-      scatter_v1.free(recv_local_vertex_v1);
+      if (mpi.isMaster())
+        print_with_prefix("Iteration %d finished.", loop_count);
     }
-    if (mpi.isMaster()) print_with_prefix("Iteration %d finished.", loop_count);
+    edge_list->endRead();
+    MPI_Free_mem(local_vertex_v0_to_send);
+    MPI_Free_mem(local_vertex_v1_to_send);
+    return degree;
   }
-  edge_list->endRead();
-  MPI_Free_mem(local_vertex_v0_to_send);
-  MPI_Free_mem(local_vertex_v1_to_send);
-  return degree;
- }
+  std::vector<int64_t> calcDegree(EdgeList* edge_list,
+                                  EdgeList* reverse_edge_list,
+                                  int64_t num_local_verts) {
+    // edge_list.v0 と edge_list.v1 で頂点の次数を計算する
+    // 頂点vの次数は、edge_list.v0==v の場合と edge_list.v1==vの場合にカウント
+    // ただし自己ループedge_list.v0 == edge_list.v1 は無視
 
- std::vector<LocalVertex> calcReorderMap(std::vector<int64_t>& degree, int64_t num_orig_local_verts) {
+    auto degree = std::vector<int64_t>(num_local_verts, 0);
+
+    // v0は各行ごとにvertex_owner_c(v0)のプロセスに分配する(vertex_owner(v0)と等価)
+    {
+      ScatterContext scatter_v0(mpi.comm_2dr);
+      int64_t* local_vertex_v0_to_send = static_cast<int64_t*>(
+          xMPI_Alloc_mem(EdgeList::CHUNK_SIZE * sizeof(int64_t)));
+
+      int num_loops = edge_list->beginRead(false);
+      for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
+        EdgeType* edge_data;
+        const int edge_data_length = edge_list->read(&edge_data);
+#pragma omp parallel
+        {
+          int* restrict counts_v0 = scatter_v0.get_counts();
+
+#pragma omp for schedule(static)
+          for (int i = 0; i < edge_data_length; ++i) {
+            const int64_t v0 = edge_data[i].v0();
+            const int64_t v1 = edge_data[i].v1();
+            if (v0 == v1) continue;
+            (counts_v0[vertex_owner_c(v0)])++;
+          }  // #pragma omp for schedule(static)
+
+#pragma omp master
+          {
+            scatter_v0.sum();
+          }  // #pragma omp master
+#pragma omp barrier
+          ;
+          int* restrict offsets_v0 = scatter_v0.get_offsets();
+
+#pragma omp for schedule(static)
+          for (int i = 0; i < edge_data_length; ++i) {
+            const int64_t v0 = edge_data[i].v0();
+            const int64_t v1 = edge_data[i].v1();
+            if (v0 == v1) continue;
+            local_vertex_v0_to_send[(offsets_v0[vertex_owner_c(v0)])++] =
+                vertex_local(v0);
+          }  // #pragma omp for schedule(static)
+        }  // #pragma omp parallel
+
+        {
+          int64_t* recv_local_vertex_v0 =
+              scatter_v0.scatter(local_vertex_v0_to_send);
+          const int64_t num_recv_local_vertex_v0 = scatter_v0.get_recv_count();
+          for (int64_t i = 0; i < num_recv_local_vertex_v0; ++i) {
+            const int64_t local_v0 = recv_local_vertex_v0[i];
+            degree[local_v0]++;
+          }
+          scatter_v0.free(recv_local_vertex_v0);
+        }
+
+        if (mpi.isMaster())
+          print_with_prefix("Iteration %d finished.", loop_count);
+      }
+      edge_list->endRead();
+      MPI_Free_mem(local_vertex_v0_to_send);
+    }
+
+    // v0は各行ごとにvertex_owner_c(v0)のプロセスに分配する(vertex_owner(v0)と等価)
+    {
+      ScatterContext scatter_v0(mpi.comm_2dr);
+      int64_t* local_vertex_v0_to_send = static_cast<int64_t*>(
+          xMPI_Alloc_mem(EdgeList::CHUNK_SIZE * sizeof(int64_t)));
+
+      int num_loops = reverse_edge_list->beginRead(false);
+      for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
+        EdgeType* edge_data;
+        const int edge_data_length = reverse_edge_list->read(&edge_data);
+#pragma omp parallel
+        {
+          int* restrict counts_v0 = scatter_v0.get_counts();
+
+#pragma omp for schedule(static)
+          for (int i = 0; i < edge_data_length; ++i) {
+            const int64_t v0 = edge_data[i].v0();
+            const int64_t v1 = edge_data[i].v1();
+            if (v0 == v1) continue;
+            (counts_v0[vertex_owner_c(v0)])++;
+          }  // #pragma omp for schedule(static)
+
+#pragma omp master
+          {
+            scatter_v0.sum();
+          }  // #pragma omp master
+#pragma omp barrier
+          ;
+          int* restrict offsets_v0 = scatter_v0.get_offsets();
+
+#pragma omp for schedule(static)
+          for (int i = 0; i < edge_data_length; ++i) {
+            const int64_t v0 = edge_data[i].v0();
+            const int64_t v1 = edge_data[i].v1();
+            if (v0 == v1) continue;
+            local_vertex_v0_to_send[(offsets_v0[vertex_owner_c(v0)])++] =
+                vertex_local(v0);
+          }  // #pragma omp for schedule(static)
+        }  // #pragma omp parallel
+
+        {
+          int64_t* recv_local_vertex_v0 =
+              scatter_v0.scatter(local_vertex_v0_to_send);
+          const int64_t num_recv_local_vertex_v0 = scatter_v0.get_recv_count();
+          for (int64_t i = 0; i < num_recv_local_vertex_v0; ++i) {
+            const int64_t local_v0 = recv_local_vertex_v0[i];
+            degree[local_v0]++;
+          }
+          scatter_v0.free(recv_local_vertex_v0);
+        }
+
+        if (mpi.isMaster())
+          print_with_prefix("Iteration %d finished.", loop_count);
+      }
+      reverse_edge_list->endRead();
+      MPI_Free_mem(local_vertex_v0_to_send);
+    }
+
+    return degree;
+  }
+
+  std::vector<LocalVertex> calcReorderMap(std::vector<int64_t>& degree,
+                                          int64_t num_orig_local_verts) {
     std::vector<LocalVertex> reorder_map(num_orig_local_verts);
     for (int64_t i = 0; i < num_orig_local_verts; ++i) {
       reorder_map[i] = i;
     }
 
     // sort by degree
-    sort2(degree.data(), reorder_map.data(), num_orig_local_verts, std::greater<int64_t>());
+    sort2(degree.data(), reorder_map.data(), num_orig_local_verts,
+          std::greater<int64_t>());
 
     return reorder_map;
   }
 
-  std::vector<LocalVertex> calcInvertMap(const std::vector<LocalVertex>& reorder_map, int64_t num_orig_local_verts) {
+  std::vector<LocalVertex> calcInvertMap(
+      const std::vector<LocalVertex>& reorder_map,
+      int64_t num_orig_local_verts) {
     std::vector<LocalVertex> invert_map(num_orig_local_verts);
     for (int64_t i = 0; i < num_orig_local_verts; ++i) {
       invert_map[reorder_map[i]] = i;
@@ -1198,6 +1774,12 @@ class GraphConstructor2DCSR {
     local_bits_ = g.local_bits_ = get_msb_index(g.num_local_verts_ - 1) + 1;
     g.r_bits_ = (mpi.size_2dr == 1) ? 0 : (get_msb_index(mpi.size_2dr - 1) + 1);
     num_wide_rows_ = g.num_local_verts_ * mpi.size_2dc / EDGE_PART_SIZE;
+    if (mpi.isMaster()) {
+      print_with_prefix("EDGE_PART_SIZE: %d", EDGE_PART_SIZE);
+      print_with_prefix("mpi.size_2dc: %d", mpi.size_2dc);
+      print_with_prefix("g.num_local_verts_: %d", g.num_local_verts_);
+      print_with_prefix("num_wide_rows: %d", num_wide_rows_);
+    }
     wide_row_starts_ = data.wide_row_starts_;
     row_starts_sup_ = data.row_starts_sup_;
     g.row_bitmap_ = data.row_bitmap_;
@@ -1210,68 +1792,68 @@ class GraphConstructor2DCSR {
   }
 
   void makeReverseEdgeList(EdgeList* edge_list, EdgeList* reverse_edge_list) {
-  typedef typename EdgeList::edge_type EdgeType;
-  ScatterContext scatter(mpi.comm_2d);
-  EdgeType* edges_to_send = static_cast<EdgeType*>(
-      xMPI_Alloc_mem(EdgeList::CHUNK_SIZE * sizeof(EdgeType)));
-  int num_loops = edge_list->beginRead(false);
-  reverse_edge_list->beginWrite();
+    typedef typename EdgeList::edge_type EdgeType;
+    ScatterContext scatter(mpi.comm_2d);
+    EdgeType* edges_to_send = static_cast<EdgeType*>(
+        xMPI_Alloc_mem(EdgeList::CHUNK_SIZE * sizeof(EdgeType)));
+    int num_loops = edge_list->beginRead(false);
+    reverse_edge_list->beginWrite();
 
-  for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
-    EdgeType* edge_data;
-    const int edge_data_length = edge_list->read(&edge_data);
+    for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
+      EdgeType* edge_data;
+      const int edge_data_length = edge_list->read(&edge_data);
 
 #pragma omp parallel
-    {
-      int* restrict counts = scatter.get_counts();
+      {
+        int* restrict counts = scatter.get_counts();
 
 #pragma omp for schedule(static)
-      for (int i = 0; i < edge_data_length; ++i) {
-        // reverse edge
-        const int64_t v1 = edge_data[i].v0();
-        const int64_t v0 = edge_data[i].v1();
-        (counts[edge_owner(v0, v1)])++;
-      }  // #pragma omp for schedule(static)
+        for (int i = 0; i < edge_data_length; ++i) {
+          // reverse edge
+          const int64_t v1 = edge_data[i].v0();
+          const int64_t v0 = edge_data[i].v1();
+          (counts[edge_owner(v0, v1)])++;
+        }  // #pragma omp for schedule(static)
 
 #pragma omp master
-      {
-        scatter.sum();
-      }  // #pragma omp master
+        {
+          scatter.sum();
+        }  // #pragma omp master
 #pragma omp barrier
-      ;
-      int* restrict offsets = scatter.get_offsets();
+        ;
+        int* restrict offsets = scatter.get_offsets();
 
 #pragma omp for schedule(static)
-      for (int i = 0; i < edge_data_length; ++i) {
-        // reverse edge
-        const int64_t v1 = edge_data[i].v0();
-        const int64_t v0 = edge_data[i].v1();
-        // assert (offsets[edge_owner(v0,v1)] < 2 * FILE_CHUNKSIZE);
-        edges_to_send[(offsets[edge_owner(v0, v1)])++].set(v0, v1);
-      }  // #pragma omp for schedule(static)
-    }  // #pragma omp parallel
+        for (int i = 0; i < edge_data_length; ++i) {
+          // reverse edge
+          const int64_t v1 = edge_data[i].v0();
+          const int64_t v0 = edge_data[i].v1();
+          // assert (offsets[edge_owner(v0,v1)] < 2 * FILE_CHUNKSIZE);
+          edges_to_send[(offsets[edge_owner(v0, v1)])++].set(v0, v1);
+        }  // #pragma omp for schedule(static)
+      }  // #pragma omp parallel
 
-    EdgeType* recv_edges = scatter.scatter(edges_to_send);
-    const int64_t num_recv_edges = scatter.get_recv_count();
+      EdgeType* recv_edges = scatter.scatter(edges_to_send);
+      const int64_t num_recv_edges = scatter.get_recv_count();
 #ifndef NDEBUG
-    for (int64_t i = 0; i < num_recv_edges; ++i) {
-      const int64_t v0 = recv_edges[i].v0();
-      const int64_t v1 = recv_edges[i].v1();
-      assert(vertex_owner_r(v0) == mpi.rank_2dr);
-      assert(vertex_owner_c(v1) == mpi.rank_2dc);
-    }
+      for (int64_t i = 0; i < num_recv_edges; ++i) {
+        const int64_t v0 = recv_edges[i].v0();
+        const int64_t v1 = recv_edges[i].v1();
+        assert(vertex_owner_r(v0) == mpi.rank_2dr);
+        assert(vertex_owner_c(v1) == mpi.rank_2dc);
+      }
 #undef VERTEX_OWNER_R
 #undef VERTEX_OWNER_C
 #endif
-    reverse_edge_list->write(recv_edges, num_recv_edges);
-    scatter.free(recv_edges);
+      reverse_edge_list->write(recv_edges, num_recv_edges);
+      scatter.free(recv_edges);
 
-    if (mpi.isMaster()) print_with_prefix("Iteration %d finished.", loop_count);
-  }
-  reverse_edge_list->endWrite();
-  edge_list->endRead();
-  MPI_Free_mem(edges_to_send);
-
+      if (mpi.isMaster())
+        print_with_prefix("Iteration %d finished.", loop_count);
+    }
+    reverse_edge_list->endWrite();
+    edge_list->endRead();
+    MPI_Free_mem(edges_to_send);
   }
 
   // function #1
@@ -2437,11 +3019,13 @@ DECODE(sort_v); g.edge_array_.set(idx, v);
   // const int cmask_;
   int log_local_verts_unit_;
   int64_t num_wide_rows_;
+  int64_t max_local_verts_;
 
   int org_local_bits_;  // local bits for original vertex id
   int local_bits_;      // local bits for reordered vertex id
 #ifdef SMALL_REORDER_BIT
-  int reorder_bits_;  // bits for reordering
+  int reorder_bits_;               // bits for reordering
+  int32_t max_local_group_verts_;  // max local group vertices
 #endif
 
   DegreeCalculation* degree_calc_;
