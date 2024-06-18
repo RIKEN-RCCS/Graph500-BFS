@@ -389,8 +389,9 @@ void auto_tuning(int root_start, int num_bfs_roots, BfsOnCPU *benchmark,
 }
 
 void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
-                  int num_bfs_roots, int validation_level, bool auto_tuning_enabled,
-                  bool corebfs_enabled, bool pre_exec, bool real_benchmark) {
+                  int num_bfs_roots, int validation_level,
+                  bool auto_tuning_enabled, bool corebfs_enabled, bool pre_exec,
+                  bool real_benchmark) {
   using namespace PRM;
   SET_AFFINITY;
 
@@ -412,6 +413,9 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
   double generation_time = MPI_Wtime();
   generate_graph_spec2010(&edge_list, SCALE, edgefactor);
   generation_time = MPI_Wtime() - generation_time;
+
+#ifdef EDGE_LIST_PREDISTRIBUTION
+
   if (mpi.isMaster()) print_with_prefix("Redistributing edge list...");
   double redistribution_time = MPI_Wtime();
   redistribute_edge_2d(&edge_list);
@@ -423,7 +427,19 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
   double construction_time = MPI_Wtime();
   benchmark->construct(SCALE, edgefactor, corebfs_enabled, &edge_list);
   construction_time = MPI_Wtime() - construction_time;
+#else
+  if (mpi.isMaster()) print_with_prefix("Graph construction");
+  // Create BFS instance and the *COMMUNICATION THREAD*.
+  BfsOnCPU *benchmark = new BfsOnCPU();
+  double construction_time = MPI_Wtime();
+  benchmark->construct(SCALE, edgefactor, corebfs_enabled, &edge_list);
+  construction_time = MPI_Wtime() - construction_time;
 
+  if (mpi.isMaster()) print_with_prefix("Redistributing edge list...");
+  double redistribution_time = MPI_Wtime();
+  redistribute_edge_2d(&edge_list);
+  redistribution_time = MPI_Wtime() - redistribution_time;
+#endif
 
   int64_t bfs_roots[num_bfs_roots];
   const int64_t max_used_vertex = find_max_used_vertex(benchmark->graph_);
@@ -722,10 +738,11 @@ static void print_help(char *argv) {
   // validate all results Note: To conform to the specification, you must set 2
 }
 
-static void set_args(const int argc, char **argv, int *edge_factor, double *alpha,
-		     double *beta, int *num_bfs_roots, int *validation_level,
-                     bool *auto_tuning_enabled, bool *corebfs_enabled,
-                     bool *pre_exec, bool *real_benchmark) {
+static void set_args(const int argc, char **argv, int *edge_factor,
+                     double *alpha, double *beta, int *num_bfs_roots,
+                     int *validation_level, bool *auto_tuning_enabled,
+                     bool *corebfs_enabled, bool *pre_exec,
+                     bool *real_benchmark) {
   int result;
   while ((result = getopt(argc, argv, "e:a:b:n:v:ACPR")) != -1) {
     switch (result) {
@@ -742,9 +759,9 @@ static void set_args(const int argc, char **argv, int *edge_factor, double *alph
         if (*beta <= 0) ERROR("-b value > 0\n");
         break;
       case 'n':
-	*num_bfs_roots = atoi(optarg);
-	if (*num_bfs_roots <= 0) ERROR("-n value > 0\n");
-	break;
+        *num_bfs_roots = atoi(optarg);
+        if (*num_bfs_roots <= 0) ERROR("-n value > 0\n");
+        break;
       case 'v':
         *validation_level = atoi(optarg);
         if (*validation_level < 0 || *validation_level > 2)
@@ -783,8 +800,9 @@ int main(int argc, char **argv) {
   bool real_benchmark = false;
   bool pre_exec = false;
 
-  set_args(argc, argv, &edge_factor, &alpha, &beta, &num_bfs_roots, &validation_level,
-           &auto_tuning_enabled, &corebfs_enabled, &pre_exec, &real_benchmark);
+  set_args(argc, argv, &edge_factor, &alpha, &beta, &num_bfs_roots,
+           &validation_level, &auto_tuning_enabled, &corebfs_enabled, &pre_exec,
+           &real_benchmark);
   if (real_benchmark) {
     num_bfs_roots = REAL_BFS_ROOTS;
     validation_level = 2;
