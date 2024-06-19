@@ -46,6 +46,22 @@ class SubRowMap {
   BitmapType* row_bitmap_;  // Index: SBI
   TwodVertex* row_sums_;    // Index: SBI
   uint32_t* row_starts_;    // Index: CSI
+
+  std::pair<uint32_t, uint32_t> GetEdgeRange(const int64_t bit_idx) {
+    const auto word_idx = bit_idx >> PRM::LOG_NBPE;
+    const auto cq_bit = BitmapType(1) << (bit_idx & PRM::NBPE_MASK);
+
+    const auto bitmap_i = row_bitmap_[word_idx];
+    if ((bitmap_i & cq_bit) == BitmapType(0)) {
+      return std::make_pair(0, 0);
+    }
+
+    const auto non_zero_offset =
+        row_sums_[word_idx] + __builtin_popcountl(bitmap_i & (cq_bit - 1));
+
+    return std::make_pair(row_starts_[non_zero_offset],
+                          row_starts_[non_zero_offset + 1]);
+  }
 };
 
 #ifdef SMALL_REORDER_BIT
@@ -1233,7 +1249,7 @@ class GraphConstructor2DCSR {
           (counts[vertex_owner(v0)])++;
           (counts[vertex_owner(v1)])++;
         }  // #pragma omp for schedule(static)
-      }  // #pragma omp parallel
+      }    // #pragma omp parallel
 
       scatter.sum();
 
@@ -1265,7 +1281,7 @@ class GraphConstructor2DCSR {
           // assert (offsets[edge_owner(v1,v0)] < 2 * FILE_CHUNKSIZE);
           edges_to_send[(offsets[vertex_owner(v1)])++] = v1_swizzled.value;
         }  // #pragma omp for schedule(static)
-      }  // #pragma omp parallel
+      }    // #pragma omp parallel
 
 #if NETWORK_PROBLEM_AYALISYS
       if (mpi.isMaster()) print_with_prefix("MPI_Alltoall...");
@@ -1365,17 +1381,19 @@ class GraphConstructor2DCSR {
 
 #if COMPRESS_ROW_STARTS
     // construct sub-row_sums
-    g.sub_row_map_.row_sums_ = static_cast<TwodVertex*>(
-        cache_aligned_xmalloc((row_bitmap_length + 1) * sizeof(TwodVertex)));
+    const int64_t sub_row_bitmap_length =
+        (non_zero_rows + NBPE_MASK) >> LOG_NBPE;
+    g.sub_row_map_.row_sums_ = static_cast<TwodVertex*>(cache_aligned_xmalloc(
+        (sub_row_bitmap_length + 1) * sizeof(TwodVertex)));
     g.sub_row_map_.row_sums_[0] = 0;
-    for (int64_t i = 0; i < row_bitmap_length; ++i) {
+    for (int64_t i = 0; i < sub_row_bitmap_length; ++i) {
       int num_rows = __builtin_popcountl(g.sub_row_map_.row_bitmap_[i]);
       g.sub_row_map_.row_sums_[i + 1] = g.sub_row_map_.row_sums_[i] + num_rows;
     }
 
     // construct sub-row_starts
     const int64_t non_zero_sub_rows =
-        g.sub_row_map_.row_sums_[row_bitmap_length];
+        g.sub_row_map_.row_sums_[sub_row_bitmap_length];
     g.sub_row_map_.row_starts_ = static_cast<uint32_t*>(
         cache_aligned_xmalloc((non_zero_sub_rows + 1) * sizeof(uint32_t)));
 
@@ -1437,8 +1455,10 @@ class GraphConstructor2DCSR {
         cache_aligned_xmalloc((non_zero_rows + 1) * sizeof(int64_t)));
 
 #if COMPRESS_ROW_STARTS
+    const int64_t sub_row_bitmap_length =
+        (non_zero_rows + NBPE_MASK) >> LOG_NBPE;
     BitmapType* sub_row_bitmap = static_cast<BitmapType*>(
-        cache_aligned_xcalloc(row_bitmap_length * sizeof(BitmapType)));
+        cache_aligned_xcalloc(sub_row_bitmap_length * sizeof(BitmapType)));
 #endif  // #if COMPRESS_ROW_STARTS
 
     if (mpi.isMaster()) print_with_prefix("Computing row_starts.");
@@ -1468,8 +1488,8 @@ class GraphConstructor2DCSR {
 
 #if COMPRESS_ROW_STARTS
           if (row_length[i] > 1) {
-            BitmapType& bitmap_v = sub_row_bitmap[word_idx];
-            BitmapType add_mask = BitmapType(1) << bit_idx;
+            BitmapType& bitmap_v = sub_row_bitmap[row_offset >> LOG_NBPE];
+            BitmapType add_mask = BitmapType(1) << (row_offset & NBPE_MASK);
             if ((bitmap_v & add_mask) == 0) {
               __sync_fetch_and_or(&bitmap_v, add_mask);
             }
@@ -1894,7 +1914,7 @@ class GraphConstructor2DCSR {
           (counts[edge_owner(v0, v1)])++;
           (counts[edge_owner(v1, v0)])++;
         }  // #pragma omp for schedule(static)
-      }  // #pragma omp parallel
+      }    // #pragma omp parallel
 
       scatter.sum();
 
