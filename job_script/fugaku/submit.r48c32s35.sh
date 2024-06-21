@@ -5,7 +5,7 @@
 #PJM -L "freq=2200,eco_state=2"
 #PJM --rsc-list "retention_state=0"
 #PJM --mpi "assign-online-node"
-#PJM -g ra000019
+#PJM -g rccs-aot
 #PJM -m b
 #PJM --mail-list masahiro.nakao@riken.jp
 #PJM -S
