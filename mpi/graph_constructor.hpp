@@ -977,6 +977,7 @@ class GraphConstructor2DCSR {
       wide_row_starts_ = NULL;
     }
   }
+
   void construct_fewer_edge_distributions(int n_edges, EdgeList* edge_list,
                                           int log_local_verts_unit,
                                           GraphType& g) {
@@ -1002,9 +1003,9 @@ class GraphConstructor2DCSR {
     g.invert_map_ = invert_map.data();
     g.num_local_verts_ = max_local_verts_;
 #ifdef SMALL_REORDER_BIT
-    g.num_groups_ = data.num_groups_;
-    g.num_group_verts_ = data.num_group_verts_;
-    reorder_bits_ = g.reorder_bits_ = data.reorder_bits_;
+    g.num_groups_ = max_local_groups_;
+    g.num_group_verts_ = max_local_group_verts_;
+    reorder_bits_ = g.reorder_bits_ = reorder_bits_;
 #endif
     local_bits_ = g.local_bits_ = get_msb_index(max_local_verts_ - 1) + 1;
     g.r_bits_ = (mpi.size_2dr == 1) ? 0 : (get_msb_index(mpi.size_2dr - 1) + 1);
@@ -1020,7 +1021,11 @@ class GraphConstructor2DCSR {
         calcWideRowOffsetAndSrcVertexesAndEdgeArray(
             edge_list, &reverse_edge_list, reorder_map.data(), wide_row_starts);
     src_vertexes_ = src_vertexes.data();
+#ifdef SMALL_REORDER_BIT
+    g.edge_array_ = edge_array;
+#else
     g.edge_array_ = edge_array.data();
+#endif
     row_starts_sup_ = static_cast<int64_t*>(
         cache_aligned_xmalloc((num_wide_rows_ + 1) * sizeof(int64_t)));
     {
@@ -1099,6 +1104,66 @@ class GraphConstructor2DCSR {
       row_starts_sup_ = NULL;
     }
 
+    int64_t src_bitmap_size = (max_local_verts_ / NBPE) * mpi.size_2dc;
+    // wide_row_startsとsrc_vertexesを使って、row_bitmapを作成
+
+    g.row_bitmap_ = static_cast<BitmapType*>(
+        cache_aligned_xcalloc(src_bitmap_size * sizeof(BitmapType)));
+
+    // row_bitmap[i]:
+    // リオーダー後のローカル頂点iの次数が0でないかどうかを表すビット列
+    //
+    // row_bitmap
+    //     [i] のjビット目が1ならば、リオーダー後のローカル頂点iの次数が0でない
+    //     // ということを表す
+
+    //     // src_vertexesをすべて走査して、row_bitmapを作成
+    for (int64_t i = 0; i < num_wide_rows_; ++i) {
+      auto start = wide_row_starts_[i];
+      auto end = wide_row_starts_[i + 1];
+      for (int64_t j = start; j < end; ++j) {
+        TwodVertex local = i * EDGE_PART_SIZE + src_vertexes_[j];
+        BitmapType& bitmap_v = g.row_bitmap_[local / NBPE];
+        BitmapType add_mask = BitmapType(1) << (local % NBPE);
+        if ((bitmap_v & add_mask) == 0) {
+          bitmap_v |= add_mask;
+        }
+      }
+    }
+
+    g.row_sums_ = static_cast<TwodVertex*>(
+        cache_aligned_xcalloc((src_bitmap_size + 1) * sizeof(TwodVertex)));
+
+    // compute sum
+    g.row_sums_[0] = 0;
+    for (int64_t i = 0; i < src_bitmap_size; ++i) {
+      int num_rows = __builtin_popcountl(g.row_bitmap_[i]);
+      g.row_sums_[i + 1] = g.row_sums_[i] + num_rows;
+    }
+    auto orig_vertexes = calcOrigVertexes(g.row_bitmap_, src_bitmap_size,
+                                          g.row_sums_, g.invert_map_);
+    g.orig_vertexes_ = orig_vertexes.data();
+    {
+      std::ofstream ofs("data/row_bitmap" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < src_bitmap_size; ++i) {
+        ofs << i << " " << g.row_bitmap_[i] << std::endl;
+      }
+    }
+    {
+      std::ofstream ofs("data/row_sums" + std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0; i < src_bitmap_size + 1; ++i) {
+        ofs << i << " " << g.row_sums_[i] << std::endl;
+      }
+    }
+    {
+      std::ofstream ofs("data/orig_vertexes" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < g.row_sums_[src_bitmap_size]; ++i) {
+        ofs << i << " " << g.orig_vertexes_[i] << std::endl;
+      }
+    }
+
     if (mpi.isMaster()) print_with_prefix("Wide CSR creation complete.");
 
     constructFromWideCSR(g);
@@ -1106,13 +1171,6 @@ class GraphConstructor2DCSR {
     computeNumVertices(g);
 
     if (mpi.isMaster()) print_with_prefix("Graph construction complete.");
-    // constructFromWideCSR(g);
-    // computeNumVertices(g);
-
-    // row_starts_sup_ = data.row_starts_sup_;
-    // g.row_bitmap_ = data.row_bitmap_;
-    // g.row_sums_ = data.row_sums_;
-    // g.orig_vertexes_ = data.orig_vertexes_;
   }
 
   void construct(int n_edges, EdgeList* edge_list, int log_local_verts_unit,
@@ -1197,7 +1255,29 @@ class GraphConstructor2DCSR {
       free(row_starts_sup_);
       row_starts_sup_ = NULL;
     }
-
+    {
+      std::ofstream ofs("data_expect/row_bitmap" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < (g.num_local_verts_ / NBPE) * mpi.size_2dc; ++i) {
+        ofs << i << " " << g.row_bitmap_[i] << std::endl;
+      }
+    }
+    {
+      std::ofstream ofs("data_expect/row_sums" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < (g.num_local_verts_ / NBPE) * mpi.size_2dc + 1;
+           ++i) {
+        ofs << i << " " << g.row_sums_[i] << std::endl;
+      }
+    }
+    {
+      std::ofstream ofs("data_expect/orig_vertexes" +
+                        std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0;
+           i < g.row_sums_[(g.num_local_verts_ / NBPE) * mpi.size_2dc]; ++i) {
+        ofs << i << " " << g.orig_vertexes_[i] << std::endl;
+      }
+    }
     if (mpi.isMaster()) print_with_prefix("Wide CSR creation complete.");
 
     constructFromWideCSR(g);
@@ -1206,6 +1286,96 @@ class GraphConstructor2DCSR {
 
     if (mpi.isMaster()) print_with_prefix("Graph construction complete.");
   }
+
+  auto calcOrigVertexes(const BitmapType* row_bitmap, int64_t row_bitmap_length,
+                        const TwodVertex* row_sums,
+                        const LocalVertex* invert_map) {
+    const auto num_non_zero_rows = row_sums[row_bitmap_length];
+    auto orig_vertexes = std::vector<LocalVertex>(num_non_zero_rows);
+    ScatterContext scatter(mpi.comm_2dr);
+    using LocalVertexType = uint32_t;
+    int* restrict counts = scatter.get_counts();
+    LocalVertexType* reorder_to_send = static_cast<LocalVertexType*>(
+        xMPI_Alloc_mem(row_bitmap_length * NBPE * sizeof(LocalVertexType)));
+    int* restrict local_indices = static_cast<int*>(
+        cache_aligned_xmalloc(row_bitmap_length * NBPE * sizeof(int)));
+    // プロセスcにリオーダー前の頂点IDを問い合わせる
+    // 1. reorderedをscatter
+    // 2. invert_map[reordered]をgather
+    // orig_vertexe_idx = row_sums[i] + popcount(bitmap & (mask - 1))
+    // orig_vertexes[orig_vertexe_idx] = gathered_invert_map[reordered]
+    for (int64_t i = 0; i < row_bitmap_length; ++i) {
+      BitmapType bitmap = row_bitmap[i];
+      for (int64_t j = 0; j < NBPE; ++j) {
+        // ビットが立っているかどうか
+        const auto mask = BitmapType(1) << j;
+        if (bitmap & mask) {
+          const auto local = i * NBPE + j;
+          // local = (max_local_verts_ ) * vertex_owner_c(v0) +
+          // (recv_reorder_id_v0[local_indices_v0[i]] )
+          // からvertex_owner_c(v0)とrecv_reorder_id_v0[local_indices_v0[i]]を取り出す
+          const auto c = local / max_local_verts_;
+          (counts[c])++;
+        }
+      }
+    }
+
+#pragma omp master
+    { scatter.sum(); }  // #pragma omp master
+#pragma omp barrier
+    int* restrict offsets = scatter.get_offsets();
+    for (int64_t i = 0; i < row_bitmap_length; ++i) {
+      BitmapType bitmap = row_bitmap[i];
+      for (int64_t j = 0; j < NBPE; ++j) {
+        // ビットが立っているかどうか
+        const auto mask = BitmapType(1) << j;
+        if (bitmap & mask) {
+          const auto local = i * NBPE + j;
+          // local = (max_local_verts_ ) * vertex_owner_c(v0) +
+          // (recv_reorder_id_v0[local_indices_v0[i]] )
+          // からvertex_owner_c(v0)とrecv_reorder_id_v0[local_indices_v0[i]]を取り出す
+          const auto c = local / max_local_verts_;
+          const auto reordered = local % max_local_verts_;
+          int pos = (offsets[c])++;
+          local_indices[local] = pos;
+          reorder_to_send[pos] = reordered;
+        }
+      }
+    }
+    LocalVertexType* recv_reorder = scatter.scatter(reorder_to_send);
+    const int num_recv_reorder = scatter.get_recv_count();
+    LocalVertexType* send_invert = static_cast<LocalVertexType*>(
+        xMPI_Alloc_mem(num_recv_reorder * sizeof(LocalVertexType)));
+    for (int i = 0; i < num_recv_reorder; ++i) {
+#if SMALL_REORDER_BIT
+      const int64_t group_id = recv_reorder[i] / max_local_group_verts_;
+      const int64_t group_offset = group_id << reorder_bits_;
+      const int reorder_id = recv_reorder[i] % max_local_group_verts_;
+      send_invert[i] = invert_map[group_offset + reorder_id];
+#else
+      send_invert[i] = invert_map[recv_reorder[i]];
+#endif
+    }
+    LocalVertexType* recv_invert = scatter.gather(send_invert);
+    for (int64_t i = 0; i < row_bitmap_length; ++i) {
+      BitmapType bitmap = row_bitmap[i];
+      for (int64_t j = 0; j < NBPE; ++j) {
+        // ビットが立っているかどうか
+        const auto mask = BitmapType(1) << j;
+        if (bitmap & mask) {
+          const auto local = i * NBPE + j;
+          // local = (max_local_verts_ ) * vertex_owner_c(v0) +
+          // (recv_reorder_id_v0[local_indices_v0[i]] )
+          // からvertex_owner_c(v0)とrecv_reorder_id_v0[local_indices_v0[i]]を取り出す
+          const auto orig_vertex_idx =
+              row_sums[i] + __builtin_popcountl(bitmap & (mask - 1));
+          orig_vertexes[orig_vertex_idx] = recv_invert[local_indices[local]];
+        }
+      }
+    }
+    return orig_vertexes;
+  }
+
   auto calcWideRowOffsetAndSrcVertexesAndEdgeArray(
       EdgeList* edge_list, EdgeList* reverse_edge_list,
       LocalVertex* reorder_map, const std::vector<int64_t>& wide_row_starts) {
@@ -1225,11 +1395,14 @@ class GraphConstructor2DCSR {
     auto src_vertexes =
         std::vector<uint16_t>(wide_row_starts[wide_row_starts.size() - 1]);
 #ifdef SMALL_REORDER_BIT
-    auto edge_array =
-        std::vector<EdgeType>(wide_row_starts[wide_row_starts.size() - 1]);
+    auto edge_array = EdgeArray();
+    edge_array.high_ptr = (uint16_t*)cache_aligned_xcalloc(
+        wide_row_starts_[wide_row_starts.size() - 1] * sizeof(uint16_t));
+    edge_array.low_ptr = (uint32_t*)cache_aligned_xcalloc(
+        wide_row_starts_[wide_row_starts.size() - 1] * sizeof(uint32_t));
 #else
     auto edge_array =
-        std::vector<int64_t>(wide_row_starts[wide_row_starts.size() - 1], -1);
+        std::vector<int64_t>(wide_row_starts[wide_row_starts.size() - 1]);
 #endif
 
     const auto calc_src_vertexes_and_edge_array_from_edgelist =
@@ -1369,17 +1542,6 @@ class GraphConstructor2DCSR {
                         .value;
                 int64_t converted =
                     SeparatedId(vertex_local(v1), low_part, vertex_bits_).value;
-
-                if (edge_array[pos] != -1) {
-                  print_with_prefix("edge_array[%d] is already set. %d -> %d",
-                                    pos, edge_array[pos], converted);
-                }
-                if (converted == 127926272) {
-                  print_with_prefix(
-                      "converted: %d, v1: %d, vertex_bits: %d, local_id: %d, "
-                      "local_bits_: %d",
-                      converted, v1, vertex_bits_, local_id, local_bits_);
-                }
 
                 edge_array[pos] = SeparatedId(converted).value;
 #endif
