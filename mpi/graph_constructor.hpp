@@ -1013,8 +1013,7 @@ class GraphConstructor2DCSR {
     calcWideRowStarts(edge_list, &reverse_edge_list, g.reorder_map_,
                       max_local_verts_);
 
-    calcWideRowOffsetAndSrcVertexesAndEdgeArray(edge_list, &reverse_edge_list,
-                                                g);
+    calcSrcVertexesAndEdgeArray(edge_list, &reverse_edge_list, g);
     row_starts_sup_ = static_cast<int64_t*>(
         cache_aligned_xcalloc((num_wide_rows_ + 1) * sizeof(int64_t)));
     sortEdges(g);
@@ -1178,14 +1177,12 @@ class GraphConstructor2DCSR {
     }
   }
 
-  void calcWideRowOffsetAndSrcVertexesAndEdgeArray(EdgeList* edge_list,
-                                                   EdgeList* reverse_edge_list,
-                                                   GraphType& g) {
+  void calcSrcVertexesAndEdgeArray(EdgeList* edge_list,
+                                   EdgeList* reverse_edge_list, GraphType& g) {
     const auto num_wide_rows = max_local_verts_ * mpi.size_2dc / EDGE_PART_SIZE;
 
     if (mpi.isMaster()) {
-      print_with_prefix(
-          "Calculating wide row offset, src vertexes and edge array.");
+      print_with_prefix("Calculating src vertexes and edge array.");
     }
     // 2周目 : src_vertexes付edge_array作成
     // wide_row_startsに対応するwide_row_offset（1本に何本のエッジを格納したか保持する配列）のメモリを確保し、ゼロ初期化する。
@@ -1362,18 +1359,15 @@ class GraphConstructor2DCSR {
 
   void calcWideRowStarts(EdgeList* edge_list, EdgeList* reverse_edge_list,
                          LocalVertex* reorder_map, int64_t num_local_verts) {
-    const auto num_wide_rows = num_local_verts * mpi.size_2dc / EDGE_PART_SIZE;
-
     if (mpi.isMaster()) {
       print_with_prefix("EDGE_PART_SIZE: %d", EDGE_PART_SIZE);
       print_with_prefix("mpi.size_2dc: %d", mpi.size_2dc);
-      print_with_prefix("num_verts: %d", num_local_verts);
-      print_with_prefix("num_wide_rows: %d", num_wide_rows);
-      print_with_prefix("calcWideRowStarts. num_wide_rows = %d", num_wide_rows);
+      print_with_prefix("g.num_local_verts_: %d", num_local_verts);
+      print_with_prefix("num_wide_rows: %d", num_wide_rows_);
+      print_with_prefix("Calculating wide_row_starts.");
     }
     wide_row_starts_ = static_cast<int64_t*>(
-        cache_aligned_xcalloc((num_wide_rows + 1) * sizeof(int64_t)));
-    // std::vector<int64_t>(num_wide_rows + 1, 0);
+        cache_aligned_xcalloc((num_wide_rows_ + 1) * sizeof(int64_t)));
     // v0の64bitのうちlocal部分とprocess番号に分ける
     // vertex_owner_c(v0)のプロセスにvertex_local(v0)を送る
     // reorder_map[vertex_local(v0)]でリオーダー後のIDを取得
@@ -1412,8 +1406,6 @@ class GraphConstructor2DCSR {
 #pragma omp barrier
           ;
           int* restrict offsets = scatter.get_offsets();
-          std::vector<int> offsets2 =
-              std::vector<int>(offsets, offsets + mpi.size_2dr);
 
 #pragma omp for schedule(static)
           for (int i = 0; i < edge_data_length; ++i) {
@@ -1466,15 +1458,14 @@ class GraphConstructor2DCSR {
     calc_wide_row_starts_from_edgelist(reverse_edge_list);
 
     // cumsum
-    for (size_t i = 1; i < num_wide_rows + 1; ++i) {
+    for (size_t i = 1; i < num_wide_rows_ + 1; ++i) {
       wide_row_starts_[i] += wide_row_starts_[i - 1];
     }
-
-    // return wide_row_starts;
   }
   void calcReorderMapAndInvertMap(GraphType& g) {
     const auto num_verts = g.num_orig_local_verts_;
-    if (mpi.isMaster()) print_with_prefix("calcReorderMapAndInvertMap.");
+    if (mpi.isMaster())
+      print_with_prefix("Calculating reorder_map and invert_map.");
     g.invert_map_ = static_cast<LocalVertex*>(
         cache_aligned_xcalloc(num_verts * sizeof(LocalVertex)));
 
@@ -1622,7 +1613,6 @@ class GraphConstructor2DCSR {
 
     g.reorder_map_ = static_cast<LocalVertex*>(
         cache_aligned_xcalloc(num_verts * sizeof(LocalVertex)));
-    // std::vector<LocalVertex> reorder_map(num_verts);
 #if SMALL_REORDER_BIT
 #pragma omp parallel for
     for (int64_t i = 0; i < num_verts; ++i) {
@@ -1640,175 +1630,6 @@ class GraphConstructor2DCSR {
       g.reorder_map_[g.invert_map_[i]] = int(i);
     }
 #endif
-  }
-
-  std::tuple<std::vector<LocalVertex>, std::vector<LocalVertex>>
-  calcReorderMapAndInvertMap(std::vector<int64_t>& degree, int64_t num_verts) {
-    if (mpi.isMaster()) print_with_prefix("calcReorderMapAndInvertMap.");
-    std::vector<LocalVertex> invert_map(num_verts);
-
-#ifdef SMALL_REORDER_BIT
-    reorder_bits_ = PRM::INITIAL_LOG_REORDER_UNIT;
-    int64_t reorder_unit = uint32_t(1) << reorder_bits_;
-    uint64_t mask_reorder = reorder_unit - 1;
-
-    int64_t* tmp_degree = static_cast<int64_t*>(
-        cache_aligned_xcalloc(num_verts * sizeof(int64_t)));
-    memcpy(tmp_degree, degree.data(), sizeof(int64_t) * num_verts);
-#endif
-
-    do {
-#if SMALL_REORDER_BIT
-      for (int64_t i = 0; i < num_verts; ++i) {
-        int32_t local_reordered_id = (i & mask_reorder);
-        invert_map[i] = local_reordered_id;
-      }
-#else
-      for (LocalVertex i = 0; i < num_verts; ++i) {
-        invert_map[i] = i;
-      }
-#endif
-
-#if SMALL_REORDER_BIT
-#pragma omp parallel for
-      for (int64_t i = 0;
-           i < std::max((num_verts >> reorder_bits_), int64_t(1)); ++i) {
-        const int64_t begin_offset = i * reorder_unit;
-        const int64_t num_sorting = std::min(reorder_unit, num_verts - i);
-
-#if VERTEX_REORDERING == 2
-        sort2(degree.data() + begin_offset, invert_map.data() + begin_offset,
-              num_sorting, std::greater<int64_t>());
-#elif VERTEX_REORDERING == 1
-        sort2(degree.data() + begin_offset, invert_map.data() + begin_offest,
-              num_sorting, ZeroOrElseComparator<int64_t>());
-#endif
-      }
-#else
-      // sort by degree
-#if VERTEX_REORDERING == 2
-      sort2(degree.data(), invert_map.data(), num_verts,
-            std::greater<int64_t>());
-#elif VERTEX_REORDERING == 1
-      sort2(degree.data(), invert_map.data(), num_verts,
-            ZeroOrElseComparator<int64_t>());
-#endif
-#endif
-
-#if SMALL_REORDER_BIT
-      max_local_group_verts_ = 0;
-      max_local_groups_ = 0;
-#pragma omp parallel for reduction(max : max_local_group_verts_, \
-                                       max_local_groups_)
-      for (int64_t i = 0; i < num_verts; i += reorder_unit) {
-        int64_t num_loop = std::min(reorder_unit, num_verts - i);
-        int32_t group_max_verts = 0;
-        for (int32_t j = num_loop - 1; j >= 0; --j) {
-          if (degree[i + j] != 0) {
-            group_max_verts = j + 1;
-            break;
-          }
-        }
-
-        if (group_max_verts > 0)
-          max_local_groups_ =
-              std::max(max_local_groups_, (i >> reorder_bits_) + 1);
-
-        max_local_group_verts_ =
-            std::max(max_local_group_verts_, group_max_verts);
-      }
-
-#else
-      max_local_verts_ = 0;
-      for (int64_t i = num_verts - 1; i >= 0; --i) {
-        if (degree[i] != 0) {
-          max_local_verts_ = i + 1;
-          break;
-        }
-      }
-#endif
-
-#if SMALL_REORDER_BIT
-      // roundup
-      int64_t local_verts_unit = int64_t(1) << log_local_verts_unit_;
-      max_local_verts_ =
-          roundup(max_local_group_verts_ * max_local_groups_, local_verts_unit);
-      // print_with_prefix("[dump] max_local_verts %d, max_local_groups = %d",
-      // max_local_verts, max_local_groups);
-
-      // get global max
-      MPI_Allreduce(MPI_IN_PLACE, &max_local_verts_, 1,
-                    MpiTypeOf<int64_t>::type, MPI_MAX, mpi.comm_2d);
-      MPI_Allreduce(MPI_IN_PLACE, &max_local_group_verts_, 1,
-                    MpiTypeOf<int32_t>::type, MPI_MAX, mpi.comm_2d);
-
-      if (mpi.isMaster())
-        print_with_prefix(
-            "max_local_verts = %lld, max_local_group_verts = %u, "
-            "max_local_groups = %ld "
-            "local_verts_unit = %lld, reorder_bits = %d",
-            max_local_verts_, max_local_group_verts_, max_local_groups_,
-            local_verts_unit, reorder_bits_);
-#else
-      // roundup
-      int64_t local_verts_unit = int64_t(1) << log_local_verts_unit_;
-      max_local_verts_ = roundup(max_local_verts_, local_verts_unit);
-      // get global max
-      MPI_Allreduce(MPI_IN_PLACE, &max_local_verts_, 1,
-                    MpiTypeOf<int64_t>::type, MPI_MAX, mpi.comm_2d);
-#endif
-
-#ifdef SMALL_REORDER_BIT
-      const int edge_array_bits = 48;
-      const int max_reorder_bits = 16;
-      auto prev_reorder_bits = reorder_bits_;
-      int local_bits = get_msb_index(max_local_verts_ - 1) + 1;
-      int r_bits =
-          (mpi.size_2dr == 1) ? 0 : (get_msb_index(mpi.size_2dr - 1) + 1);
-
-      reorder_bits_ =
-          std::min(max_reorder_bits, edge_array_bits - (local_bits + r_bits));
-      reorder_unit = uint32_t(1) << reorder_bits_;
-      mask_reorder = reorder_unit - 1;
-
-      if (reorder_bits_ <= 0) {
-        // this statement occurs when local_bits + r_bits exceeds edge_array
-        // bits(48). can not run BFS
-        throw_exception(
-            "reorder bits is less than equal 0, "
-            "edge_array_bits = %d, local_bits = %d, "
-            "r_bits = %d, reorder_bits = %d",
-            edge_array_bits, local_bits, r_bits, reorder_bits_);
-      }
-      if (prev_reorder_bits == reorder_bits_) break;
-
-      // write back to degree for next loop
-      memcpy(degree.data(), tmp_degree, sizeof(int64_t) * num_verts);
-#else
-      break;
-#endif
-    } while (1);
-
-    std::vector<LocalVertex> reorder_map(num_verts);
-#if SMALL_REORDER_BIT
-#pragma omp parallel for
-    for (int64_t i = 0; i < num_verts; ++i) {
-      int64_t reordered_group_id = (i >> reorder_bits_) * reorder_unit;
-      int32_t local_reordered_id = (i & mask_reorder);
-
-      reorder_map[reordered_group_id + invert_map[i]] =
-          LocalVertex(local_reordered_id);
-    }
-
-    free(tmp_degree);
-#else
-#pragma omp parallel for
-    for (int64_t i = 0; i < num_verts; ++i) {
-      reorder_map[invert_map[i]] = int(i);
-    }
-#endif
-
-    return std::tuple(reorder_map, invert_map);
   }
 
   void copy_to_gpu(GraphType& g, bool graph_on_gpu_) {
@@ -1864,7 +1685,7 @@ class GraphConstructor2DCSR {
     // edge_list.v0 と edge_list.v1 で頂点の次数を計算する
     // 頂点vの次数は、edge_list.v0==v の場合と edge_list.v1==vの場合にカウント
     // ただし自己ループedge_list.v0 == edge_list.v1 は無視
-
+    if (mpi.isMaster()) print_with_prefix("Calculating degree.");
     g.degree_ = static_cast<int64_t*>(
         cache_aligned_xcalloc(num_local_verts * sizeof(int64_t)));
     using LocalVertexType = uint32_t;
