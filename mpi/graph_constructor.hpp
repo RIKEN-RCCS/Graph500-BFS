@@ -987,15 +987,6 @@ class GraphConstructor2DCSR {
     log_local_verts_unit_ =
         std::max<int>(log_local_verts_unit, LOG_EDGE_PART_SIZE);
     g.log_orig_global_verts_ = 0;
-    // edge_listのv0とv1を入れ替えたreverse_edge_listを作成
-    std::string path;
-    const char* path_ptr = nullptr;
-    if (getenv("TMPFILE") != nullptr) {
-      path = path + getenv("TMPFILE") + "-reverse";
-      path_ptr = path.c_str();
-    }
-    EdgeListStorage<UnweightedPackedEdge> reverse_edge_list(n_edges, path_ptr);
-    makeReverseEdgeList(edge_list, &reverse_edge_list);
     searchMaxVertex(edge_list, g);
     calcDegree(edge_list, g.num_orig_local_verts_, g);
     calcReorderMapAndInvertMap(g);
@@ -1010,10 +1001,22 @@ class GraphConstructor2DCSR {
     num_wide_rows_ = g.num_local_verts_ * mpi.size_2dc / EDGE_PART_SIZE;
     vertex_bits_ = g.r_bits_ + local_bits_;
 
-    calcWideRowStarts(edge_list, &reverse_edge_list, g.reorder_map_,
-                      max_local_verts_);
+    {
+      // edge_listのv0とv1を入れ替えたreverse_edge_listを作成
+      std::string path;
+      const char* path_ptr = nullptr;
+      if (getenv("TMPFILE") != nullptr) {
+        path = path + getenv("TMPFILE") + "-reverse";
+        path_ptr = path.c_str();
+      }
+      EdgeListStorage<UnweightedPackedEdge> reverse_edge_list(n_edges,
+                                                              path_ptr);
+      makeReverseEdgeList(edge_list, &reverse_edge_list);
+      calcWideRowStarts(edge_list, &reverse_edge_list, g.reorder_map_,
+                        max_local_verts_);
 
-    calcSrcVertexesAndEdgeArray(edge_list, &reverse_edge_list, g);
+      calcSrcVertexesAndEdgeArray(edge_list, &reverse_edge_list, g);
+    }
     row_starts_sup_ = static_cast<int64_t*>(
         cache_aligned_xcalloc((num_wide_rows_ + 1) * sizeof(int64_t)));
     sortEdges(g);
@@ -1044,6 +1047,7 @@ class GraphConstructor2DCSR {
     searchMaxVertex(edge_list, g);
     scatterAndScanEdges(edge_list);
     makeWideRowStarts(g);
+
     scatterAndStore(edge_list, g);
     sortEdges(g);
     if (row_starts_sup_ != NULL) {
@@ -1177,6 +1181,10 @@ class GraphConstructor2DCSR {
         }
       }
     }
+    scatter.free(recv_reorder);
+    scatter.free(send_invert);
+    scatter.free(recv_invert);
+    MPI_Free_mem(reorder_to_send);
   }
 
   void calcSrcVertexesAndEdgeArray(EdgeList* edge_list,
@@ -1345,8 +1353,10 @@ class GraphConstructor2DCSR {
 #endif
               }
               scatter_v0.free(recv_vertex_local_v0);
+              scatter_v0.free(send_reorder_id_v0);
               scatter_v0.free(recv_reorder_id_v0);
               scatter_v1.free(recv_vertex_local_v1);
+              scatter_v1.free(send_reorder_id_v1);
               scatter_v1.free(recv_reorder_id_v1);
             }
           }
@@ -1448,6 +1458,7 @@ class GraphConstructor2DCSR {
             wide_row_starts_[wide_row_idx_v0 + 1]++;
           }
           scatter.free(recv_vertex_local);
+          scatter.free(send_reorder_id);
           scatter.free(recv_reorder_id);
         }
       }
@@ -1757,10 +1768,10 @@ class GraphConstructor2DCSR {
         LocalVertexType* recv_local_vertex_v1 =
             scatter_v1.scatter(local_vertex_v1_to_send);
         const auto num_recv_local_vertex_v1 = scatter_v1.get_recv_count();
+#pragma omp parallel for
         for (int32_t i = 0; i < num_recv_local_vertex_v1; ++i) {
           const auto local_v1 = recv_local_vertex_v1[i];
           __sync_fetch_and_add(&g.degree_[local_v1], 1);
-          // g.degree_[local_v1]++;
         }
         scatter_v1.free(recv_local_vertex_v1);
       }
