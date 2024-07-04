@@ -998,6 +998,13 @@ class GraphConstructor2DCSR {
     makeReverseEdgeList(edge_list, &reverse_edge_list);
     searchMaxVertex(edge_list, g);
     calcDegree(edge_list, g.num_orig_local_verts_, g);
+    {
+      std::ofstream ofs("data/degree_before_sort" + std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0; i < g.num_orig_local_verts_; ++i) {
+        ofs << i << " " << g.degree_[i] << std::endl;
+      }
+      ofs.close();
+    }
     calcReorderMapAndInvertMap(g);
     g.num_local_verts_ = max_local_verts_;
 #ifdef SMALL_REORDER_BIT
@@ -1016,7 +1023,70 @@ class GraphConstructor2DCSR {
     calcSrcVertexesAndEdgeArray(edge_list, &reverse_edge_list, g);
     row_starts_sup_ = static_cast<int64_t*>(
         cache_aligned_xcalloc((num_wide_rows_ + 1) * sizeof(int64_t)));
+    {
+      std::ofstream ofs("data/wide_row_starts_before_sort" +
+                        std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0; i < num_wide_rows_ + 1; ++i) {
+        ofs << i << " " << wide_row_starts_[i] << std::endl;
+      }
+    }
+    {
+      std::ofstream ofs("data/edge_array_before_sort" +
+                        std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0; i < wide_row_starts_[num_wide_rows_]; ++i) {
+        ofs << i << " " << g.edge_array_[i] << std::endl;
+      }
+    }
+    {
+      std::ofstream ofs("data/src_vertexes_before_sort" +
+                        std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0; i < wide_row_starts_[num_wide_rows_]; ++i) {
+        ofs << i << " " << src_vertexes_[i] << std::endl;
+      }
+    }
     sortEdges(g);
+    {
+      std::ofstream ofs("data/degree" + std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0; i < g.num_orig_local_verts_; ++i) {
+        ofs << i << " " << g.degree_[i] << std::endl;
+      }
+      ofs.close();
+    }
+    {
+      std::ofstream ofs("data/reorder" + std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0; i < g.num_orig_local_verts_; ++i) {
+        ofs << i << " " << g.reorder_map_[i] << std::endl;
+      }
+      ofs.close();
+    }
+    {
+      std::ofstream ofs("data/invert" + std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0; i < g.num_orig_local_verts_; ++i) {
+        ofs << i << " " << g.invert_map_[i] << std::endl;
+      }
+      ofs.close();
+    }
+    {
+      std::ofstream ofs("data/wide_row_starts" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < num_wide_rows_ + 1; ++i) {
+        ofs << i << " " << wide_row_starts_[i] << std::endl;
+      }
+    }
+    {
+      std::ofstream ofs("data/edge_array" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < wide_row_starts_[num_wide_rows_]; ++i) {
+        ofs << i << " " << g.edge_array_[i] << std::endl;
+      }
+    }
+    {
+      std::ofstream ofs("data/src_vertexes" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < wide_row_starts_[num_wide_rows_]; ++i) {
+        ofs << i << " " << src_vertexes_[i] << std::endl;
+      }
+    }
     if (mpi.isMaster()) {
       print_with_prefix("Graph construction is done.");
     }
@@ -1027,8 +1097,29 @@ class GraphConstructor2DCSR {
     }
 
     calcRowBitMapRowSums(g);
-    calcOrigVertexes(g);
     int64_t src_bitmap_size = (max_local_verts_ / NBPE) * mpi.size_2dc;
+    {
+      std::ofstream ofs("data/row_bitmap" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < src_bitmap_size; ++i) {
+        ofs << i << " " << g.row_bitmap_[i] << std::endl;
+      }
+    }
+    {
+      std::ofstream ofs("data/row_sums" + std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0; i < src_bitmap_size + 1; ++i) {
+        ofs << i << " " << g.row_sums_[i] << std::endl;
+      }
+    }
+    calcOrigVertexes(g);
+
+    {
+      std::ofstream ofs("data/orig_vertexes" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < g.row_sums_[src_bitmap_size]; ++i) {
+        ofs << i << " " << g.orig_vertexes_[i] << std::endl;
+      }
+    }
 
     if (mpi.isMaster()) print_with_prefix("Wide CSR creation complete.");
 
@@ -1048,12 +1139,100 @@ class GraphConstructor2DCSR {
     searchMaxVertex(edge_list, g);
     scatterAndScanEdges(edge_list);
     makeWideRowStarts(g);
-
+    {
+      std::ofstream ofs("data_expect/wide_row_starts_before_sort" +
+                        std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0; i < num_wide_rows_ + 1; ++i) {
+        ofs << i << " " << wide_row_starts_[i] << std::endl;
+      }
+    }
     scatterAndStore(edge_list, g);
+    {
+      std::ofstream ofs("data_expect/edge_array_before_sort" +
+                        std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0; i < wide_row_starts_[num_wide_rows_]; ++i) {
+        ofs << i << " " << g.edge_array_[i] << std::endl;
+      }
+    }
+    {
+      std::ofstream ofs("data_expect/src_vertexes_before_sort" +
+                        std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0; i < wide_row_starts_[num_wide_rows_]; ++i) {
+        ofs << i << " " << src_vertexes_[i] << std::endl;
+      }
+    }
     sortEdges(g);
+    {
+      std::ofstream ofs("data_expect/degree" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < g.num_orig_local_verts_; ++i) {
+        ofs << i << " " << g.degree_[i] << std::endl;
+      }
+      ofs.close();
+    }
+    {
+      std::ofstream ofs("data_expect/reorder" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < g.num_orig_local_verts_; ++i) {
+        ofs << i << " " << g.reorder_map_[i] << std::endl;
+      }
+      ofs.close();
+    }
+    {
+      std::ofstream ofs("data_expect/invert" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < g.num_orig_local_verts_; ++i) {
+        ofs << i << " " << g.invert_map_[i] << std::endl;
+      }
+      ofs.close();
+    }
+    {
+      std::ofstream ofs("data_expect/wide_row_starts" +
+                        std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0; i < num_wide_rows_ + 1; ++i) {
+        ofs << i << " " << wide_row_starts_[i] << std::endl;
+      }
+    }
+    {
+      std::ofstream ofs("data_expect/edge_array" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < wide_row_starts_[num_wide_rows_]; ++i) {
+        ofs << i << " " << g.edge_array_[i] << std::endl;
+      }
+    }
+    {
+      std::ofstream ofs("data_expect/src_vertexes" +
+                        std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0; i < wide_row_starts_[num_wide_rows_]; ++i) {
+        ofs << i << " " << src_vertexes_[i] << std::endl;
+      }
+    }
     if (row_starts_sup_ != NULL) {
       free(row_starts_sup_);
       row_starts_sup_ = NULL;
+    }
+    {
+      std::ofstream ofs("data_expect/row_bitmap" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < (g.num_local_verts_ / NBPE) * mpi.size_2dc; ++i) {
+        ofs << i << " " << g.row_bitmap_[i] << std::endl;
+      }
+    }
+    {
+      std::ofstream ofs("data_expect/row_sums" + std::to_string(mpi.rank_2d) +
+                        ".txt");
+      for (int64_t i = 0; i < (g.num_local_verts_ / NBPE) * mpi.size_2dc + 1;
+           ++i) {
+        ofs << i << " " << g.row_sums_[i] << std::endl;
+      }
+    }
+    {
+      std::ofstream ofs("data_expect/orig_vertexes" +
+                        std::to_string(mpi.rank_2d) + ".txt");
+      for (int64_t i = 0;
+           i < g.row_sums_[(g.num_local_verts_ / NBPE) * mpi.size_2dc]; ++i) {
+        ofs << i << " " << g.orig_vertexes_[i] << std::endl;
+      }
     }
     if (mpi.isMaster()) print_with_prefix("Wide CSR creation complete.");
 
@@ -1064,6 +1243,7 @@ class GraphConstructor2DCSR {
     if (mpi.isMaster()) print_with_prefix("Graph construction complete.");
   }
   void calcRowBitMapRowSums(GraphType& g) {
+    if (mpi.isMaster()) print_with_prefix("calc row sums bitmap.");
     int64_t src_bitmap_size = (max_local_verts_ / NBPE) * mpi.size_2dc;
     g.row_bitmap_ = static_cast<BitmapType*>(
         cache_aligned_xcalloc(src_bitmap_size * sizeof(BitmapType)));
@@ -1090,22 +1270,26 @@ class GraphConstructor2DCSR {
     }
   }
   auto calcOrigVertexes(GraphType& g) {
+    if (mpi.isMaster()) print_with_prefix("calc orig vertexes.");
     const auto row_bitmap_length = (max_local_verts_ / NBPE) * mpi.size_2dc;
     const auto num_non_zero_rows = g.row_sums_[row_bitmap_length];
     g.orig_vertexes_ = static_cast<LocalVertex*>(
         cache_aligned_xcalloc(num_non_zero_rows * sizeof(LocalVertex)));
     ScatterContext scatter(mpi.comm_2dr);
     using LocalVertexType = uint32_t;
-    int* restrict counts = scatter.get_counts();
     LocalVertexType* reorder_to_send = static_cast<LocalVertexType*>(
         xMPI_Alloc_mem(row_bitmap_length * NBPE * sizeof(LocalVertexType)));
     int* restrict local_indices = static_cast<int*>(
         cache_aligned_xmalloc(row_bitmap_length * NBPE * sizeof(int)));
+#pragma omp parallel
+{
+    int* restrict counts = scatter.get_counts();
     // プロセスcにリオーダー前の頂点IDを問い合わせる
     // 1. reorderedをscatter
     // 2. invert_map[reordered]をgather
     // orig_vertexe_idx = row_sums[i] + popcount(bitmap & (mask - 1))
     // orig_vertexes[orig_vertexe_idx] = gathered_invert_map[reordered]
+#pragma omp for schedule(static)
     for (int64_t i = 0; i < row_bitmap_length; ++i) {
       BitmapType bitmap = g.row_bitmap_[i];
       for (int64_t j = 0; j < NBPE; ++j) {
@@ -1126,6 +1310,7 @@ class GraphConstructor2DCSR {
     { scatter.sum(); }  // #pragma omp master
 #pragma omp barrier
     int* restrict offsets = scatter.get_offsets();
+#pragma omp for schedule(static)
     for (int64_t i = 0; i < row_bitmap_length; ++i) {
       BitmapType bitmap = g.row_bitmap_[i];
       for (int64_t j = 0; j < NBPE; ++j) {
@@ -1144,6 +1329,7 @@ class GraphConstructor2DCSR {
         }
       }
     }
+}
     LocalVertexType* recv_reorder = scatter.scatter(reorder_to_send);
     const int num_recv_reorder = scatter.get_recv_count();
     LocalVertexType* send_invert = static_cast<LocalVertexType*>(
@@ -1743,9 +1929,10 @@ class GraphConstructor2DCSR {
         LocalVertexType* recv_local_vertex_v0 =
             scatter_v0.scatter(local_vertex_v0_to_send);
         const auto num_recv_local_vertex_v0 = scatter_v0.get_recv_count();
+#pragma omp parallel for
         for (int32_t i = 0; i < num_recv_local_vertex_v0; ++i) {
           const auto local_v0 = recv_local_vertex_v0[i];
-          g.degree_[local_v0]++;
+          __sync_fetch_and_add(&g.degree_[local_v0], 1);
         }
         scatter_v0.free(recv_local_vertex_v0);
       }
@@ -1756,7 +1943,8 @@ class GraphConstructor2DCSR {
         const auto num_recv_local_vertex_v1 = scatter_v1.get_recv_count();
         for (int32_t i = 0; i < num_recv_local_vertex_v1; ++i) {
           const auto local_v1 = recv_local_vertex_v1[i];
-          g.degree_[local_v1]++;
+          __sync_fetch_and_add(&g.degree_[local_v1], 1);
+          // g.degree_[local_v1]++;
         }
         scatter_v1.free(recv_local_vertex_v1);
       }
