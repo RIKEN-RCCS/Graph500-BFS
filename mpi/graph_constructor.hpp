@@ -1459,6 +1459,9 @@ class GraphConstructor2DCSR {
         (non_zero_rows + NBPE_MASK) >> LOG_NBPE;
     BitmapType* sub_row_bitmap = static_cast<BitmapType*>(
         cache_aligned_xcalloc(sub_row_bitmap_length * sizeof(BitmapType)));
+    VERVOSE(if (mpi.isMaster()) {
+      print_with_prefix("sub_row_bitmap_length %f M", to_mega(sub_row_bitmap_length));
+    });
 #endif  // #if COMPRESS_ROW_STARTS
 
     if (mpi.isMaster()) print_with_prefix("Computing row_starts.");
