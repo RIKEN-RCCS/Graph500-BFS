@@ -1000,14 +1000,16 @@ class GraphConstructor2DCSR {
     g.r_bits_ = (mpi.size_2dr == 1) ? 0 : (get_msb_index(mpi.size_2dr - 1) + 1);
     num_wide_rows_ = g.num_local_verts_ * mpi.size_2dc / EDGE_PART_SIZE;
     vertex_bits_ = g.r_bits_ + local_bits_;
-
     {
       // edge_listのv0とv1を入れ替えたreverse_edge_listを作成
       std::string path;
       const char* path_ptr = nullptr;
       if (getenv("TMPFILE") != nullptr) {
+        if (mpi.isMaster()) print_with_prefix("TMPFILE-reverse.");
         path = path + getenv("TMPFILE") + "-reverse";
         path_ptr = path.c_str();
+      } else {
+        if (mpi.isMaster()) print_with_prefix("NO TMPFILE-reverse.");
       }
       EdgeListStorage<UnweightedPackedEdge> reverse_edge_list(n_edges,
                                                               path_ptr);
@@ -1359,6 +1361,8 @@ class GraphConstructor2DCSR {
               scatter_v1.free(send_reorder_id_v1);
               scatter_v1.free(recv_reorder_id_v1);
             }
+            if (mpi.isMaster())
+              print_with_prefix("Iteration %d finished.", loop_count);
           }
           edge_list->endRead();
           MPI_Free_mem(local_vertex_to_send_v0);
@@ -1461,6 +1465,8 @@ class GraphConstructor2DCSR {
           scatter.free(send_reorder_id);
           scatter.free(recv_reorder_id);
         }
+        if (mpi.isMaster())
+          print_with_prefix("Iteration %d finished.", loop_count);
       }
       edge_list->endRead();
       MPI_Free_mem(local_vertex_to_send);
@@ -1839,6 +1845,7 @@ class GraphConstructor2DCSR {
   }
 
   void makeReverseEdgeList(EdgeList* edge_list, EdgeList* reverse_edge_list) {
+    if (mpi.isMaster()) print_with_prefix("Make ReverseEdgeList");
     typedef typename EdgeList::edge_type EdgeType;
     ScatterContext scatter(mpi.comm_2d);
     EdgeType* edges_to_send = static_cast<EdgeType*>(
