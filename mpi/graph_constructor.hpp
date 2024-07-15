@@ -1100,9 +1100,7 @@ class GraphConstructor2DCSR {
     ScatterContext scatter(mpi.comm_2dr);
     using LocalVertexType = uint32_t;
     LocalVertexType* reorder_to_send = static_cast<LocalVertexType*>(
-        xMPI_Alloc_mem(row_bitmap_length * NBPE * sizeof(LocalVertexType)));
-    int* restrict local_indices = static_cast<int*>(
-        cache_aligned_xmalloc(row_bitmap_length * NBPE * sizeof(int)));
+        xMPI_Alloc_mem(num_non_zero_rows * sizeof(LocalVertexType)));
 #pragma omp parallel
     {
       int* restrict counts = scatter.get_counts();
@@ -1145,9 +1143,7 @@ class GraphConstructor2DCSR {
             // からvertex_owner_c(v0)とrecv_reorder_id_v0[local_indices_v0[i]]を取り出す
             const auto c = local / max_local_verts_;
             const auto reordered = local % max_local_verts_;
-            int pos = (offsets[c])++;
-            local_indices[local] = pos;
-            reorder_to_send[pos] = reordered;
+            reorder_to_send[(offsets[c])++] = reordered;
           }
         }
       }
@@ -1156,6 +1152,7 @@ class GraphConstructor2DCSR {
     const int num_recv_reorder = scatter.get_recv_count();
     LocalVertexType* send_invert = static_cast<LocalVertexType*>(
         xMPI_Alloc_mem(num_recv_reorder * sizeof(LocalVertexType)));
+#pragma omp parallel for
     for (int i = 0; i < num_recv_reorder; ++i) {
 #if SMALL_REORDER_BIT
       const int64_t group_id = recv_reorder[i] / max_local_group_verts_;
@@ -1167,21 +1164,9 @@ class GraphConstructor2DCSR {
 #endif
     }
     LocalVertexType* recv_invert = scatter.gather(send_invert);
-    for (int64_t i = 0; i < row_bitmap_length; ++i) {
-      BitmapType bitmap = g.row_bitmap_[i];
-      for (int64_t j = 0; j < NBPE; ++j) {
-        // ビットが立っているかどうか
-        const auto mask = BitmapType(1) << j;
-        if (bitmap & mask) {
-          const auto local = i * NBPE + j;
-          // local = (max_local_verts_ ) * vertex_owner_c(v0) +
-          // (recv_reorder_id_v0[local_indices_v0[i]] )
-          // からvertex_owner_c(v0)とrecv_reorder_id_v0[local_indices_v0[i]]を取り出す
-          const auto orig_vertex_idx =
-              g.row_sums_[i] + __builtin_popcountl(bitmap & (mask - 1));
-          g.orig_vertexes_[orig_vertex_idx] = recv_invert[local_indices[local]];
-        }
-      }
+#pragma omp parallel for
+    for (TwodVertex i = 0; i < num_non_zero_rows; ++i) {
+      g.orig_vertexes_[i] = recv_invert[i];
     }
     scatter.free(recv_reorder);
     scatter.free(send_invert);
@@ -1285,6 +1270,7 @@ class GraphConstructor2DCSR {
               LocalVertexType* send_reorder_id_v0 =
                   static_cast<LocalVertexType*>(xMPI_Alloc_mem(
                       num_recv_vertex_local_v0 * sizeof(LocalVertexType)));
+#pragma omp parallel for
               for (int i = 0; i < num_recv_vertex_local_v0; ++i) {
 #ifdef SMALL_REORDER_BIT
                 send_reorder_id_v0[i] =
@@ -1301,6 +1287,7 @@ class GraphConstructor2DCSR {
               LocalVertexType* send_reorder_id_v1 =
                   static_cast<LocalVertexType*>(xMPI_Alloc_mem(
                       num_recv_vertex_local_v1 * sizeof(LocalVertexType)));
+#pragma omp parallel for
               for (int i = 0; i < num_recv_vertex_local_v1; ++i) {
 #ifdef SMALL_REORDER_BIT
                 send_reorder_id_v1[i] =
@@ -1315,6 +1302,7 @@ class GraphConstructor2DCSR {
                   scatter_v0.gather(send_reorder_id_v0);
               LocalVertexType* recv_reorder_id_v1 =
                   scatter_v1.gather(send_reorder_id_v1);
+#pragma omp parallel for
               for (int i = 0; i < edge_data_length; ++i) {
                 int64_t v0 = edge_data[i].v0();
                 int64_t v1 = edge_data[i].v1();
@@ -1323,10 +1311,9 @@ class GraphConstructor2DCSR {
                     (max_local_verts_ / EDGE_PART_SIZE) * vertex_owner_c(v0) +
                     (recv_reorder_id_v0[local_indices_v0[i]] >>
                      LOG_EDGE_PART_SIZE);
-
-                const int64_t pos = wide_row_starts_[wide_row_idx_v0] +
-                                    wide_row_offset[wide_row_idx_v0];
-                wide_row_offset[wide_row_idx_v0]++;
+                const int64_t pos =
+                    wide_row_starts_[wide_row_idx_v0] +
+                    __sync_fetch_and_add(&wide_row_offset[wide_row_idx_v0], 1);
                 src_vertexes_[pos] = (EDGE_PART_SIZE - 1) &
                                      recv_reorder_id_v0[local_indices_v0[i]];
                 const auto local_id = recv_reorder_id_v1[local_indices_v1[i]];
@@ -1354,6 +1341,8 @@ class GraphConstructor2DCSR {
                 g.edge_array_[pos] = SeparatedId(converted).value;
 #endif
               }
+              free(local_indices_v0);
+              free(local_indices_v1);
               scatter_v0.free(recv_vertex_local_v0);
               scatter_v0.free(send_reorder_id_v0);
               scatter_v0.free(recv_reorder_id_v0);
@@ -1441,6 +1430,7 @@ class GraphConstructor2DCSR {
           const int num_recv_vertex_local = scatter.get_recv_count();
           LocalVertexType* send_reorder_id = static_cast<LocalVertexType*>(
               xMPI_Alloc_mem(num_recv_vertex_local * sizeof(LocalVertexType)));
+#pragma omp parallel for
           for (int i = 0; i < num_recv_vertex_local; ++i) {
 #ifdef SMALL_REORDER_BIT
             send_reorder_id[i] = (recv_vertex_local[i] >> reorder_bits_) *
@@ -1452,6 +1442,7 @@ class GraphConstructor2DCSR {
           }
 
           LocalVertexType* recv_reorder_id = scatter.gather(send_reorder_id);
+#pragma omp parallel for
           for (int i = 0; i < edge_data_length; ++i) {
             int64_t v0 = edge_data[i].v0();
             int64_t v1 = edge_data[i].v1();
@@ -1459,8 +1450,9 @@ class GraphConstructor2DCSR {
             int64_t wide_row_idx_v0 =
                 (max_local_verts_ / EDGE_PART_SIZE) * vertex_owner_c(v0) +
                 (recv_reorder_id[local_indices[i]] >> LOG_EDGE_PART_SIZE);
-            wide_row_starts_[wide_row_idx_v0 + 1]++;
+            __sync_fetch_and_add(&wide_row_starts_[wide_row_idx_v0 + 1], 1);
           }
+          free(local_indices);
           scatter.free(recv_vertex_local);
           scatter.free(send_reorder_id);
           scatter.free(recv_reorder_id);
@@ -1505,6 +1497,7 @@ class GraphConstructor2DCSR {
         g.invert_map_[i] = local_reordered_id;
       }
 #else
+#pragma omp parallel for
       for (LocalVertex i = 0; i < num_verts; ++i) {
         g.invert_map_[i] = i;
       }
@@ -1515,7 +1508,8 @@ class GraphConstructor2DCSR {
       for (int64_t i = 0;
            i < std::max((num_verts >> reorder_bits_), int64_t(1)); ++i) {
         const int64_t begin_offset = i * reorder_unit;
-        const int64_t num_sorting = std::min(reorder_unit, num_verts - i);
+        const int64_t num_sorting =
+            std::min(reorder_unit, num_verts - i * reorder_unit);
 
 #if VERTEX_REORDERING == 2
         sort2(g.degree_ + begin_offset, g.invert_map_ + begin_offset,
@@ -3092,7 +3086,7 @@ DECODE(sort_v); g.edge_array_.set(idx, v);
   uint16_t* src_vertexes_;
   int64_t* wide_row_starts_;
   int64_t* row_starts_sup_;
-};
+};  // namespace detail
 
 }  // namespace detail
 
