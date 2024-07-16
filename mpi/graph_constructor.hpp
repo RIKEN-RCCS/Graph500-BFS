@@ -452,6 +452,10 @@ struct DegreeCalculation {
       free(orig_vertexes_);
       orig_vertexes_ = NULL;
     }
+    if (num_vertexes_ != NULL) {
+      free(num_vertexes_);
+      num_vertexes_ = NULL;
+    }
     if (row_length_ != NULL) {
       free(row_length_);
       row_length_ = NULL;
