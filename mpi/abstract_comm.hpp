@@ -71,6 +71,8 @@ class AsyncAlltoallManager {
     buffer_size_ = buffer_provider_->buffer_length();
   }
   virtual ~AsyncAlltoallManager() {
+    delete d_;
+    d_ = NULL;
     delete[] node_;
     node_ = NULL;
   }
