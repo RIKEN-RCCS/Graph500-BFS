@@ -1444,9 +1444,9 @@ class GraphConstructor2DCSR {
       }
     }
     if(num_edge_count[0] != 0) {
-      // `num_edge_count` should be 0 because reordering eliminates them
-      // (but group reordering leaves some of them, doesn't it?)
-      print_with_prefix("num_edge_count[0] != 0");
+      // `num_edge_count` should be zero because `row_starts` should not have
+      // any values corresponding to vertices without incident edges.
+      print_with_prefix("WARNING: num_edge_count[0] != 0");
     }
     // Exploit `num_edge_count[0]` to sum up the number of vertices
     num_edge_count[0] = non_zero_rows;
