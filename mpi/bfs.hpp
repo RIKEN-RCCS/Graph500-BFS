@@ -141,6 +141,8 @@ class BfsBase {
     EdgeListStorage<UnweightedPackedEdge> core_edge_list(n_edges, path_ptr);
 
     corebfs_ = corebfs_adaptor::preprocess(scale, edge_list, &core_edge_list);
+    INDEXED_BFS_LOG_RSS(); // Print in the outside of `preprocess()`'s scope
+
     constructor.construct(&core_edge_list, log_local_verts_unit, graph_);
   }
 
@@ -160,8 +162,8 @@ class BfsBase {
                const double alpha, const double beta,
                int64_t* auto_tuning_data);
 
-  void run_bfs_core(int64_t root, int64_t* pred, const int edgefactor,
-                    const double alpha, const double beta,
+  void run_bfs_core(int64_t root, size_t root_level, int64_t* pred,
+                    const int edgefactor, const double alpha, const double beta,
                     int64_t* auto_tuning_data);
 
   void get_pred(int64_t* pred) {
@@ -3272,15 +3274,19 @@ void BfsBase::run_bfs(int64_t root, int64_t* pred, const int edgefactor,
                       const double alpha, const double beta,
                       int64_t* auto_tuning_data) {
   if (!corebfs_) {
-    run_bfs_core(root, pred, edgefactor, alpha, beta, auto_tuning_data);
+    run_bfs_core(root, 0, pred, edgefactor, alpha, beta, auto_tuning_data);
     return;
   }
 
   // Traverse to the 2-core and overwrite `root`
   int64_t core_root;
+  size_t core_root_lv;
   std::vector<std::pair<uint32_t, int64_t>> path_to_core;
-  std::tie(core_root, path_to_core) = corebfs_->bfs_tree(root);
-  run_bfs_core(core_root, pred, edgefactor, alpha, beta, auto_tuning_data);
+  std::tie(core_root, core_root_lv, path_to_core) = corebfs_->bfs_tree(root);
+
+  run_bfs_core(core_root, core_root_lv, pred, edgefactor, alpha, beta,
+               auto_tuning_data);
+
   corebfs_->write_tree_parents(pred, path_to_core);
 }
 
@@ -3288,9 +3294,9 @@ void BfsBase::run_bfs(int64_t root, int64_t* pred, const int edgefactor,
 // Performs BFS on the 2-core of a given graph.
 // No traversals will occur if `root` is outside the 2-core.
 //
-void BfsBase::run_bfs_core(int64_t root, int64_t* pred, const int edgefactor,
-                           const double alpha, const double beta,
-                           int64_t* auto_tuning_data) {
+void BfsBase::run_bfs_core(int64_t root, size_t root_level, int64_t* pred,
+                           const int edgefactor, const double alpha,
+                           const double beta, int64_t* auto_tuning_data) {
   SET_AFFINITY;
 #if ENABLE_FUJI_PROF
   fapp_start("initialize", 0, 0);
@@ -3321,7 +3327,7 @@ void BfsBase::run_bfs_core(int64_t root, int64_t* pred, const int edgefactor,
   int64_t global_visited_vertices = 1;  // count the root vertex
 
   // perform level 0
-  current_level_ = 0;
+  current_level_ = root_level;
   max_nq_size_ = 1;
   global_nq_size_ = 0;
   forward_or_backward_ = next_forward_or_backward;

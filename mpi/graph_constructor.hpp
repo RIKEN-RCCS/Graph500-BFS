@@ -372,6 +372,8 @@ struct DegreeCalculation {
     BLOCK_SIZE = 1 << LOG_BLOCK_SIZE,
   };
 
+  const size_t DWIDE_ROW_DATA_FIXED_SIZE = 32 * (1ull << 30);  // 32GiB
+
   int org_local_bits_;
   int log_local_verts_unit_;
 #ifdef SMALL_REORDER_BIT
@@ -416,7 +418,8 @@ struct DegreeCalculation {
         cache_aligned_xcalloc(num_rows_ * sizeof(int64_t)));
     row_offset_prev_ = static_cast<int64_t*>(
         cache_aligned_xcalloc(num_rows_ * sizeof(int64_t)));
-    dwide_row_data_ = NULL;
+    dwide_row_data_ = static_cast<DWideRowEdge*>(
+        page_aligned_xmalloc(DWIDE_ROW_DATA_FIXED_SIZE));
     dwide_row_offsets_ = NULL;
   }
 
@@ -496,13 +499,10 @@ struct DegreeCalculation {
     }
     std::memcpy(row_length_prev_, row_length_, num_rows_ * sizeof(int64_t));
 
-    // resize data store
-    if (dwide_row_data_) {
-      dwide_row_data_ = static_cast<DWideRowEdge*>(std::realloc(
-          dwide_row_data_, cur_offset[num_rows_] * sizeof(DWideRowEdge)));
-    } else {
-      dwide_row_data_ = static_cast<DWideRowEdge*>(
-          page_aligned_xmalloc(cur_offset[num_rows_] * sizeof(DWideRowEdge)));
+    // check out-of-bounds
+    if (cur_offset[num_rows_] * sizeof(DWideRowEdge) >
+        DWIDE_ROW_DATA_FIXED_SIZE) {
+      print_with_prefix("dwide_row_data_: found out-of-bounds");
     }
 
     // store data
@@ -542,6 +542,7 @@ struct DegreeCalculation {
 
   LocalVertex* calc_degree(int64_t* degree) {
     if (mpi.isMaster()) print_with_prefix("Counting degree.");
+    INDEXED_BFS_LOG_RSS();
 
     int64_t num_verts = num_orig_local_verts();
     vertexes_ = static_cast<LocalVertex*>(
@@ -1284,6 +1285,7 @@ class GraphConstructor2DCSR {
 
       if (mpi.isMaster())
         print_with_prefix("Iteration %d finished.", loop_count);
+      INDEXED_BFS_LOG_RSS();
     }
     edge_list->endRead();
     MPI_Free_mem(edges_to_send);
