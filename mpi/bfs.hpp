@@ -124,14 +124,19 @@ class BfsBase {
     int log_local_verts_unit =
         get_msb_index(std::max<int>(BFELL_SORT, NBPE) * 8);
     detail::GraphConstructor2DCSR<EdgeList> constructor;
-
+    const int64_t n_edges = (int64_t(1) << scale) * edgefactor / mpi.size_2d;
     if (!corebfs_enabled) {
-      constructor.construct(edge_list, log_local_verts_unit, graph_);
+#ifdef EDGE_LIST_PREDISTRIBUTION
+      constructor.construct_fewer_edge_distributions(
+          n_edges, edge_list, log_local_verts_unit, graph_);
+#else
+      constructor.construct(n_edges, edge_list, log_local_verts_unit, graph_);
+#endif
       return;
     }
 
     // Create temporary EdgeListStrorage for storing core edges
-    const int64_t n_edges = (int64_t(1) << scale) * edgefactor / mpi.size_2d;
+
     std::string path;
     const char* path_ptr = nullptr;
     if (getenv("TMPFILE") != nullptr) {
@@ -143,7 +148,8 @@ class BfsBase {
     corebfs_ = corebfs_adaptor::preprocess(scale, edge_list, &core_edge_list);
     INDEXED_BFS_LOG_RSS(); // Print in the outside of `preprocess()`'s scope
 
-    constructor.construct(&core_edge_list, log_local_verts_unit, graph_);
+    constructor.construct(n_edges, &core_edge_list, log_local_verts_unit,
+                          graph_);
   }
 
   void prepare_bfs(int validation_level, bool pre_exec, bool real_benchmark,
@@ -2741,9 +2747,10 @@ class BfsBase {
 #if 1  // which one is faster ?
     int recv_count[mpi.size_2dc];
     for (int i = 0; i < mpi.size_2dc; ++i) recv_count[i] = 1;
-    MPI_Reduce_scatter(visited_count, &nq_size_, recv_count, MpiTypeOf<int64_t>::type, MPI_SUM,
-                       mpi.comm_2dr);
-    MPI_Allreduce(&nq_size_, &max_nq_size_, 1, MpiTypeOf<int64_t>::type, MPI_MAX, mpi.comm_2d);
+    MPI_Reduce_scatter(visited_count, &nq_size_, recv_count,
+                       MpiTypeOf<int64_t>::type, MPI_SUM, mpi.comm_2dr);
+    MPI_Allreduce(&nq_size_, &max_nq_size_, 1, MpiTypeOf<int64_t>::type,
+                  MPI_MAX, mpi.comm_2d);
 #ifdef PROFILE_REGIONS
     timer_stop(IMBALANCE_TIME);
 #endif
