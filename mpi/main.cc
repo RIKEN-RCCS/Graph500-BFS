@@ -389,18 +389,16 @@ void auto_tuning(int root_start, int num_bfs_roots, BfsOnCPU *benchmark,
 }
 
 void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
-                  int num_bfs_roots, int validation_level,
+                  int num_bfs_roots, int root_start, int validation_level,
                   bool auto_tuning_enabled, bool corebfs_enabled, bool pre_exec,
                   bool real_benchmark) {
   using namespace PRM;
   SET_AFFINITY;
 
-  int64_t auto_tuning_data[num_bfs_roots][AUTO_NUM];
-  double bfs_times[num_bfs_roots], validate_times[num_bfs_roots],
-      edge_counts[num_bfs_roots];
-  LogFileFormat log = {0};
-  int root_start = read_log_file(&log, SCALE, edgefactor, bfs_times,
-                                 validate_times, edge_counts);
+  std::vector<int64_t[AUTO_NUM]> auto_tuning_data(num_bfs_roots);
+  std::vector<double> bfs_times(num_bfs_roots);
+  std::vector<double> validate_times(num_bfs_roots);
+  std::vector<double> edge_counts(num_bfs_roots);
   if (mpi.isMaster() && root_start != 0)
     print_with_prefix("Resume from %d th run", root_start);
 
@@ -456,10 +454,6 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
 #endif
 
   bool result_ok = true;
-
-  if (root_start == 0)
-    init_log(SCALE, edgefactor, generation_time, construction_time,
-             redistribution_time, &log);
 
   benchmark->prepare_bfs(validation_level, pre_exec, real_benchmark, edgefactor,
                          alpha, beta, pred);
@@ -620,7 +614,10 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
 #endif
     PROF(profiling::g_pis.printResult());
     if (mpi.isMaster()) {
-      print_with_prefix("Time for BFS %02d is %f", i, bfs_times[i]);
+      // Print the time in the max precision for log-based post-analysis
+      print_with_prefix("Time for BFS %02d is %f (%.*e)", i, bfs_times[i],
+                        std::numeric_limits<double>::max_digits10,
+                        bfs_times[i]);
     }
 
     benchmark->get_pred(pred);
@@ -642,6 +639,10 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
       }
     } else {  // validation_level == 0
       edge_visit_count = pf_nedge[SCALE];
+      if (mpi.isMaster()) {
+        print_with_prefix("Sleep 10s");
+      }
+      std::this_thread::sleep_for(std::chrono::seconds(10));
     }
 
     validate_times[i] = MPI_Wtime() - validate_times[i];
@@ -659,8 +660,6 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
     if (result_ok == false) {
       break;
     }
-
-    update_log_file(&log, bfs_times[i], validate_times[i], edge_visit_count);
   }
   benchmark->end_bfs();
 
@@ -680,11 +679,11 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
     fprintf(stdout, "construction_time:              %g\n", construction_time);
     fprintf(stdout, "redistribution_time:            %g\n",
             redistribution_time);
-    print_bfs_result(num_bfs_roots, bfs_times, validate_times, edge_counts,
-                     result_ok);
+    print_bfs_result(num_bfs_roots, bfs_times.data(), validate_times.data(),
+                     edge_counts.data(), result_ok);
   }
 #ifdef PROFILE_REGIONS
-  timer_print(bfs_times, num_bfs_roots);
+  timer_print(bfs_times.data(), num_bfs_roots);
 #endif
 
 #if FUGAKU_MPI_PRINT_STATS
@@ -730,21 +729,36 @@ void test02(int SCALE, int edgefactor)
     exit(1);                      \
   } while (0)
 static void print_help(char *argv) {
-  ERROR(
-      "%s SCALE [-e edge_factor] [-a alpha] [-b beta] [-v validation level] "
-      "[-P] [-R]\n",
-      argv);
-  // Validation Level: 0: No validation, 1: validate at first time only, 2:
-  // validate all results Note: To conform to the specification, you must set 2
+  ERROR(R"(
+Usage: %s SCALE [OPTION]...
+
+Options:
+  -e <edge factor>    Set an edge factor
+  -a <alpha>          Set alpha
+  -b <beta>           Set beta
+  -n <count>          Set the number of search keys
+  -s <count>          Skip the specified number of search keys
+  -v <level>          Validation level
+  -A                  Enable auto-tuning of alpha and beta
+  -C                  Enable CoreBFS
+  -P                  Enable pre-execution
+  -R                  Set options at once as specified in the Graph500 spec.
+
+Validation levels:
+  0: No validation
+  1: Validate the result of the first search key only
+  2: Validate all results (required by Graph500 specification)
+)",
+        argv);
 }
 
 static void set_args(const int argc, char **argv, int *edge_factor,
                      double *alpha, double *beta, int *num_bfs_roots,
-                     int *validation_level, bool *auto_tuning_enabled,
-                     bool *corebfs_enabled, bool *pre_exec,
-                     bool *real_benchmark) {
+                     int *root_start, int *validation_level,
+                     bool *auto_tuning_enabled, bool *corebfs_enabled,
+                     bool *pre_exec, bool *real_benchmark) {
   int result;
-  while ((result = getopt(argc, argv, "e:a:b:n:v:ACPR")) != -1) {
+  while ((result = getopt(argc, argv, "e:a:b:n:s:v:ACPR")) != -1) {
     switch (result) {
       case 'e':
         *edge_factor = atoi(optarg);
@@ -761,6 +775,10 @@ static void set_args(const int argc, char **argv, int *edge_factor,
       case 'n':
         *num_bfs_roots = atoi(optarg);
         if (*num_bfs_roots <= 0) ERROR("-n value > 0\n");
+        break;
+      case 's':
+        *root_start = atoi(optarg);
+        if (*root_start <= 0) ERROR("-s value > 0\n");
         break;
       case 'v':
         *validation_level = atoi(optarg);
@@ -794,13 +812,14 @@ int main(int argc, char **argv) {
   double alpha = DEFAULT_ALPHA;
   double beta = DEFAULT_BETA;
   int num_bfs_roots = TEST_BFS_ROOTS;
+  int root_start = 0;
   int validation_level = DEFAULT_VALIDATION_LEVEL;
   bool auto_tuning_enabled = false;
   bool corebfs_enabled = false;
   bool real_benchmark = false;
   bool pre_exec = false;
 
-  set_args(argc, argv, &edge_factor, &alpha, &beta, &num_bfs_roots,
+  set_args(argc, argv, &edge_factor, &alpha, &beta, &num_bfs_roots, &root_start,
            &validation_level, &auto_tuning_enabled, &corebfs_enabled, &pre_exec,
            &real_benchmark);
   if (real_benchmark) {
@@ -808,10 +827,16 @@ int main(int argc, char **argv) {
     validation_level = 2;
     pre_exec = true;
   }
+  if (root_start != 0 && auto_tuning_enabled){
+    // Please refer to #37
+    // https://github.com/RIKEN-RCCS/Graph500-BFS-private/issues/37
+    ERROR("-s and -A are not available at the same time.\n");
+  }
 
   setup_globals(argc, argv, scale, edge_factor);
-  graph500_bfs(scale, edge_factor, alpha, beta, num_bfs_roots, validation_level,
-               auto_tuning_enabled, corebfs_enabled, pre_exec, real_benchmark);
+  graph500_bfs(scale, edge_factor, alpha, beta, num_bfs_roots, root_start,
+               validation_level, auto_tuning_enabled, corebfs_enabled, pre_exec,
+               real_benchmark);
   cleanup_globals();
 
   return 0;

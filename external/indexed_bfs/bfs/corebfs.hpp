@@ -120,10 +120,10 @@ static bfs_index construct(const int scale, std::vector<edge> &&edges) {
   return {std::move(d), std::move(core), std::move(tree_parents)};
 }
 
-// `Callback` should be `void c(vertex u, global_vertex parent)`.
+// `Callback` should be `void c(vertex u, global_vertex parent, size_t level)`.
 // It is called when the parent of vertex `u` is found.
 template <typename Callback>
-static global_vertex
+static std::pair<global_vertex, size_t>
 bfs_tree_with_callback(const yoo &d, const parent_array &tree_parents,
                        const global_vertex root, Callback c) {
   global_vertex u = root;
@@ -138,9 +138,9 @@ bfs_tree_with_callback(const yoo &d, const parent_array &tree_parents,
   // It is supposed not to occur after the parents of vertices not in the giant
   // connected component are removed from `tree_parents`.
   //
-  while (p.t >= 0) {
+  for (size_t lv = 0;; ++lv) {
     if (d.owner_rank(p) == d.all().rank()) {
-      c(d.to_local_remote(p), u);
+      c(d.to_local_remote(p), u, lv);
     }
     u = p; // Move to the parent
 
@@ -149,15 +149,18 @@ bfs_tree_with_callback(const yoo &d, const parent_array &tree_parents,
       p = tree_parents[d.to_local_remote(u)];
     }
     p = net::bcast(p, d.owner_rank(u), d.all());
-  }
 
-  return u;
+    if (p.t < 0) {
+      return std::make_pair(u, lv);
+    }
+  }
 }
 
-static global_vertex bfs_tree(bfs_state *const s, const global_vertex root) {
+static std::pair<global_vertex, size_t> bfs_tree(bfs_state *const s,
+                                                 const global_vertex root) {
   return bfs_tree_with_callback(
       s->ix.dist, s->ix.tree_parents, root,
-      [&](vertex u, global_vertex p) { s->parents_local[u.t] = p; });
+      [&](vertex u, global_vertex p, size_t lv) { s->parents_local[u.t] = p; });
 }
 
 //
@@ -170,7 +173,7 @@ static void bfs(bfs_state *const s, const global_vertex root) {
     std::cout << "  root: " << root << std::endl;
   }
 
-  const global_vertex core_root = bfs_tree(s, root);
+  const global_vertex core_root = bfs_tree(s, root).first;
   bfs_core(s, core_root);
 }
 

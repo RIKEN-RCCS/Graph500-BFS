@@ -12,7 +12,7 @@
    fun:getsockopt
    fun:pmix_ptl_base_set_timeout
    fun:pmix_ptl_base_make_connection
-   obj:/usr/lib/x86_64-linux-gnu/pmix2/lib/libpmix.so.2.5.2
+   obj:/usr/lib/x86_64-linux-gnu/pmix2/lib/libpmix.so.2.*
    fun:PMIx_Init
    fun:ext3x_client_init
    obj:/usr/lib/x86_64-linux-gnu/openmpi/lib/openmpi3/mca_ess_pmi.so
@@ -30,7 +30,7 @@
    fun:getsockopt
    fun:pmix_ptl_base_set_timeout
    fun:pmix_ptl_base_make_connection
-   obj:/usr/lib/x86_64-linux-gnu/pmix2/lib/libpmix.so.2.5.2
+   obj:/usr/lib/x86_64-linux-gnu/pmix2/lib/libpmix.so.2.*
    fun:PMIx_Init
    fun:ext3x_client_init
    obj:/usr/lib/x86_64-linux-gnu/openmpi/lib/openmpi3/mca_ess_pmi.so
@@ -47,7 +47,7 @@
    fun:setsockopt_syscall
    fun:setsockopt
    fun:pmix_ptl_base_make_connection
-   obj:/usr/lib/x86_64-linux-gnu/pmix2/lib/libpmix.so.2.5.2
+   obj:/usr/lib/x86_64-linux-gnu/pmix2/lib/libpmix.so.2.*
    fun:PMIx_Init
    fun:ext3x_client_init
    obj:/usr/lib/x86_64-linux-gnu/openmpi/lib/openmpi3/mca_ess_pmi.so
@@ -66,7 +66,50 @@
    fun:pmix_ptl_base_send_handler
    obj:/usr/lib/x86_64-linux-gnu/libevent_core-2.1.so.7.0.1
    fun:event_base_loop
-   obj:/usr/lib/x86_64-linux-gnu/pmix2/lib/libpmix.so.2.5.2
+   obj:/usr/lib/x86_64-linux-gnu/pmix2/lib/libpmix.so.2.*
    fun:start_thread
    fun:clone
+}
+# For some reason, `vector[...]` does not match `vector[1]`, and so we need
+# another suppression condition
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Param
+   writev(vector[1])
+   fun:__writev
+   fun:writev
+   fun:pmix_ptl_base_send_handler
+   obj:/usr/lib/x86_64-linux-gnu/libevent_core-2.1.so.7.0.1
+   fun:event_base_loop
+   obj:/usr/lib/x86_64-linux-gnu/pmix2/lib/libpmix.so.2.*
+   fun:start_thread
+   fun:clone
+}
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Leak
+   match-leak-kinds: definite
+   ...
+   fun:PMPI_Init_thread
+}
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Leak
+   match-leak-kinds: definite
+   ...
+   fun:ompi_mpi_finalize
+}
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Leak
+   match-leak-kinds: definite
+   ...
+   fun:_dl_catch_error
+}
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Leak
+   match-leak-kinds: definite
+   ...
+   obj:/usr/lib/x86_64-linux-gnu/libevent_core-2.*.so.7.*
 }

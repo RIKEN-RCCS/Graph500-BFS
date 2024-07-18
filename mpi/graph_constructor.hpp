@@ -372,6 +372,12 @@ struct DegreeCalculation {
     BLOCK_SIZE = 1 << LOG_BLOCK_SIZE,
   };
 
+#ifdef __FUJITSU // On Fugaku
+  const size_t DWIDE_ROW_DATA_FIXED_SIZE = 32 * (1ull << 30);  // 32GiB
+#else
+  const size_t DWIDE_ROW_DATA_FIXED_SIZE = sizeof(DWideRowEdge);
+#endif
+
   int org_local_bits_;
   int log_local_verts_unit_;
 #ifdef SMALL_REORDER_BIT
@@ -416,7 +422,8 @@ struct DegreeCalculation {
         cache_aligned_xcalloc(num_rows_ * sizeof(int64_t)));
     row_offset_prev_ = static_cast<int64_t*>(
         cache_aligned_xcalloc(num_rows_ * sizeof(int64_t)));
-    dwide_row_data_ = NULL;
+    dwide_row_data_ = static_cast<DWideRowEdge*>(
+        page_aligned_xmalloc(DWIDE_ROW_DATA_FIXED_SIZE));
     dwide_row_offsets_ = NULL;
   }
 
@@ -444,6 +451,10 @@ struct DegreeCalculation {
     if (orig_vertexes_ != NULL) {
       free(orig_vertexes_);
       orig_vertexes_ = NULL;
+    }
+    if (num_vertexes_ != NULL) {
+      free(num_vertexes_);
+      num_vertexes_ = NULL;
     }
     if (row_length_ != NULL) {
       free(row_length_);
@@ -496,13 +507,15 @@ struct DegreeCalculation {
     }
     std::memcpy(row_length_prev_, row_length_, num_rows_ * sizeof(int64_t));
 
-    // resize data store
-    if (dwide_row_data_) {
+    // check out-of-bounds
+    if (cur_offset[num_rows_] * sizeof(DWideRowEdge) >
+        DWIDE_ROW_DATA_FIXED_SIZE) {
+#ifdef __FUJITSU
+      // Realloc is not expected on Fugaku
+      print_with_prefix("dwide_row_data_: found out-of-bounds");
+#endif
       dwide_row_data_ = static_cast<DWideRowEdge*>(std::realloc(
           dwide_row_data_, cur_offset[num_rows_] * sizeof(DWideRowEdge)));
-    } else {
-      dwide_row_data_ = static_cast<DWideRowEdge*>(
-          page_aligned_xmalloc(cur_offset[num_rows_] * sizeof(DWideRowEdge)));
     }
 
     // store data
@@ -542,6 +555,7 @@ struct DegreeCalculation {
 
   LocalVertex* calc_degree(int64_t* degree) {
     if (mpi.isMaster()) print_with_prefix("Counting degree.");
+    INDEXED_BFS_LOG_RSS();
 
     int64_t num_verts = num_orig_local_verts();
     vertexes_ = static_cast<LocalVertex*>(
@@ -2094,6 +2108,7 @@ class GraphConstructor2DCSR {
 
       if (mpi.isMaster())
         print_with_prefix("Iteration %d finished.", loop_count);
+      INDEXED_BFS_LOG_RSS();
     }
     edge_list->endRead();
     MPI_Free_mem(edges_to_send);
@@ -2225,6 +2240,45 @@ class GraphConstructor2DCSR {
     if (mpi.isMaster()) print_with_prefix("Finished compacting edge array.");
   }
 
+  // Counts and prints the number of low-degree vertices, particularly for
+  // calculating the memory size saved by multilevel bitmap compression.
+  void printLowDegreeVertexCounts(
+    const int64_t non_zero_rows,
+    const int64_t* const row_starts
+  ) {
+    std::vector<int64_t> num_edge_count(10);
+#pragma omp parallel for
+    for (int64_t non_zero_idx = 0; non_zero_idx < non_zero_rows;
+         ++non_zero_idx) {
+      int64_t e_start = row_starts[non_zero_idx];
+      int64_t e_end = row_starts[non_zero_idx + 1];
+      int64_t num_edges = e_end - e_start;
+      if(num_edges < (int64_t)num_edge_count.size()) {
+        __sync_fetch_and_add(&num_edge_count[num_edges], 1);
+      }
+    }
+    if(num_edge_count[0] != 0) {
+      // `num_edge_count` should be zero because `row_starts` should not have
+      // any values corresponding to vertices without incident edges.
+      print_with_prefix("WARNING: num_edge_count[0] != 0");
+    }
+    // Exploit `num_edge_count[0]` to sum up the number of vertices
+    num_edge_count[0] = non_zero_rows;
+    std::vector<int64_t> sum_edge_count(10);
+    MPI_Reduce(num_edge_count.data(), sum_edge_count.data(),
+               (int)num_edge_count.size(), MpiTypeOf<int64_t>::type, MPI_SUM,
+               0, mpi.comm_2d);
+    if(mpi.isMaster()) {
+      for(int i = 0; i < (int)sum_edge_count.size(); ++i) {
+        if (i >= 1) {
+          sum_edge_count[i] = sum_edge_count[i - 1] - sum_edge_count[i];
+        }
+        print_with_prefix("#Vertices with more than %d neighbors: %ld", i,
+                          sum_edge_count[i]);
+      }
+    }
+  }
+
   void constructFromWideCSR(GraphType& g) {
     TRACER(form_csr);
     const int64_t num_local_verts = g.num_local_verts_;
@@ -2323,6 +2377,10 @@ class GraphConstructor2DCSR {
     wide_row_starts_ = NULL;
     free(src_vertexes_);
     src_vertexes_ = NULL;
+
+#if VERVOSE_MODE
+    printLowDegreeVertexCounts(non_zero_rows, row_starts);
+#endif // #if VERVOSE_MODE
 
     g.row_starts_ = row_starts;
 #if COMPRESS_ROW_STARTS
