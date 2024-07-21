@@ -5,6 +5,20 @@
 ################################################################################
 
 {
+   <insert_a_suppression_name_here>
+   Memcheck:Leak
+   match-leak-kinds: definite
+   ...
+   fun:_dl_catch_error
+}
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Leak
+   match-leak-kinds: definite
+   ...
+   obj:/usr/lib/x86_64-linux-gnu/libevent_core-2.*.so.7.*
+}
+{
    allow_allocating_zero_sized_receive_buffers
    Memcheck:BadSize
    fun:posix_memalign
@@ -113,18 +127,4 @@
    match-leak-kinds: definite
    ...
    fun:ompi_mpi_finalize
-}
-{
-   <insert_a_suppression_name_here>
-   Memcheck:Leak
-   match-leak-kinds: definite
-   ...
-   fun:_dl_catch_error
-}
-{
-   <insert_a_suppression_name_here>
-   Memcheck:Leak
-   match-leak-kinds: definite
-   ...
-   obj:/usr/lib/x86_64-linux-gnu/libevent_core-2.*.so.7.*
 }
