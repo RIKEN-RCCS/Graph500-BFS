@@ -26,6 +26,19 @@
    fun:_Z10end_gatherP6gather
    fun:_ZN13BfsValidation19build_bfs_depth_mapElbPl
 }
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:calloc
+   fun:calloc
+   fun:allocate_dtv
+   fun:_dl_allocate_tls
+   fun:allocate_stack
+   fun:pthread_create*
+   obj:/usr/lib/x86_64-linux-gnu/libgomp.so.1.*
+   fun:GOMP_parallel
+}
 
 ################################################################################
 #
