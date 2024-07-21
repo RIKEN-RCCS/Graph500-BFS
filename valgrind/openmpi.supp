@@ -1,5 +1,20 @@
 ################################################################################
 #
+# General Suppressions on Linux
+#
+################################################################################
+
+{
+   allow_allocating_zero_sized_receive_buffers
+   Memcheck:BadSize
+   fun:posix_memalign
+   fun:page_aligned_xmalloc
+   fun:_Z10end_gatherP6gather
+   fun:_ZN13BfsValidation19build_bfs_depth_mapElbPl
+}
+
+################################################################################
+#
 # Suppressions for OpenMPI
 #
 ################################################################################
