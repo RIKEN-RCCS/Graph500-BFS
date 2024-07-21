@@ -146,10 +146,15 @@ class BfsBase {
     EdgeListStorage<UnweightedPackedEdge> core_edge_list(n_edges, path_ptr);
 
     corebfs_ = corebfs_adaptor::preprocess(scale, edge_list, &core_edge_list);
-    INDEXED_BFS_LOG_RSS(); // Print in the outside of `preprocess()`'s scope
+    INDEXED_BFS_LOG_RSS();  // Print in the outside of `preprocess()`'s scope
 
+#ifdef EDGE_LIST_PREDISTRIBUTION
+    constructor.construct_fewer_edge_distributions(
+        n_edges, &core_edge_list, log_local_verts_unit, graph_);
+#else
     constructor.construct(n_edges, &core_edge_list, log_local_verts_unit,
                           graph_);
+#endif
   }
 
   void prepare_bfs(int validation_level, bool pre_exec, bool real_benchmark,
