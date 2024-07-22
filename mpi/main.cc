@@ -413,18 +413,27 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
   generation_time = MPI_Wtime() - generation_time;
 
 #ifdef EDGE_LIST_PREDISTRIBUTION
+  //
+  // If EDGE_LIST_PREDISTRIBUTION is disabled, the result of
+  // `redistribute_edge_2d()` is used only in vaidation. Hence,
+  // `redistribution_time` is considered to be part of validation time and
+  // separated from `construction_time`.
+  // However, if EDGE_LIST_PREDISTRIBUTION is enabled, the result of
+  // `redistribute_edge_2d()` is used in the graph construction, and hence its
+  // processing time is considered to be part of `construction_time`.
+  //
+  const double redistribution_time = 0.0;
+  const double construction_start = MPI_Wtime();
 
   if (mpi.isMaster()) print_with_prefix("Redistributing edge list...");
-  double redistribution_time = MPI_Wtime();
   redistribute_edge_2d(&edge_list);
-  redistribution_time = MPI_Wtime() - redistribution_time;
 
   if (mpi.isMaster()) print_with_prefix("Graph construction");
   // Create BFS instance and the *COMMUNICATION THREAD*.
   BfsOnCPU *benchmark = new BfsOnCPU();
-  double construction_time = MPI_Wtime();
   benchmark->construct(SCALE, edgefactor, corebfs_enabled, &edge_list);
-  construction_time = MPI_Wtime() - construction_time;
+
+  const double construction_time = MPI_Wtime() - construction_start;
 #else
   if (mpi.isMaster()) print_with_prefix("Graph construction");
   // Create BFS instance and the *COMMUNICATION THREAD*.
