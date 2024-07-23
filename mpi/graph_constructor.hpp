@@ -388,7 +388,7 @@ struct DegreeCalculation {
     BLOCK_SIZE = 1 << LOG_BLOCK_SIZE,
   };
 
-#ifdef __FUJITSU // On Fugaku
+#ifdef __FUJITSU                                               // On Fugaku
   const size_t DWIDE_ROW_DATA_FIXED_SIZE = 32 * (1ull << 30);  // 32GiB
 #else
   const size_t DWIDE_ROW_DATA_FIXED_SIZE = sizeof(DWideRowEdge);
@@ -1131,76 +1131,92 @@ class GraphConstructor2DCSR {
     using LocalVertexType = uint32_t;
     LocalVertexType* reorder_to_send = static_cast<LocalVertexType*>(
         xMPI_Alloc_mem(num_non_zero_rows * sizeof(LocalVertexType)));
+    const auto num_blocks = 8;  // 8分割
+    const auto block_length = (row_bitmap_length + num_blocks - 1) / num_blocks;
+    TwodVertex orig_vertexes_offset = 0;
+    for (int loop_count = 0; loop_count < num_blocks; ++loop_count) {
+      const int64_t bitmap_block_begin = block_length * loop_count;
+      const int64_t bitmap_block_end =
+          std::min(bitmap_block_begin + block_length, row_bitmap_length);
 #pragma omp parallel
-    {
-      int* restrict counts = scatter.get_counts();
-      // プロセスcにリオーダー前の頂点IDを問い合わせる
-      // 1. reorderedをscatter
-      // 2. invert_map[reordered]をgather
-      // orig_vertexe_idx = row_sums[i] + popcount(bitmap & (mask - 1))
-      // orig_vertexes[orig_vertexe_idx] = gathered_invert_map[reordered]
+      {
+        int* restrict counts = scatter.get_counts();
+        // プロセスcにリオーダー前の頂点IDを問い合わせる
+        // 1. reorderedをscatter
+        // 2. invert_map[reordered]をgather
+        // orig_vertexe_idx = row_sums[i] + popcount(bitmap & (mask - 1))
+        // orig_vertexes[orig_vertexe_idx] = gathered_invert_map[reordered]
 #pragma omp for schedule(static)
-      for (int64_t i = 0; i < row_bitmap_length; ++i) {
-        BitmapType bitmap = g.row_bitmap_[i];
-        for (int64_t j = 0; j < NBPE; ++j) {
-          // ビットが立っているかどうか
-          const auto mask = BitmapType(1) << j;
-          if (bitmap & mask) {
-            const auto local = i * NBPE + j;
-            // local = (max_local_verts_ ) * vertex_owner_c(v0) +
-            // (recv_reorder_id_v0[local_indices_v0[i]] )
-            // からvertex_owner_c(v0)とrecv_reorder_id_v0[local_indices_v0[i]]を取り出す
-            const auto c = local / max_local_verts_;
-            (counts[c])++;
+        for (int64_t i = bitmap_block_begin; i < bitmap_block_end; ++i) {
+          BitmapType bitmap = g.row_bitmap_[i];
+          for (int64_t j = 0; j < NBPE; ++j) {
+            // ビットが立っているかどうか
+            const auto mask = BitmapType(1) << j;
+            if (bitmap & mask) {
+              const auto local = i * NBPE + j;
+              // local = (max_local_verts_ ) * vertex_owner_c(v0) +
+              // (recv_reorder_id_v0[local_indices_v0[i]] )
+              // からvertex_owner_c(v0)とrecv_reorder_id_v0[local_indices_v0[i]]を取り出す
+              const auto c = local / max_local_verts_;
+              (counts[c])++;
+            }
           }
         }
-      }
 
 #pragma omp master
-      { scatter.sum(); }  // #pragma omp master
+        { scatter.sum(); }  // #pragma omp master
 #pragma omp barrier
-      int* restrict offsets = scatter.get_offsets();
+        int* restrict offsets = scatter.get_offsets();
 #pragma omp for schedule(static)
-      for (int64_t i = 0; i < row_bitmap_length; ++i) {
-        BitmapType bitmap = g.row_bitmap_[i];
-        for (int64_t j = 0; j < NBPE; ++j) {
-          // ビットが立っているかどうか
-          const auto mask = BitmapType(1) << j;
-          if (bitmap & mask) {
-            const auto local = i * NBPE + j;
-            // local = (max_local_verts_ ) * vertex_owner_c(v0) +
-            // (recv_reorder_id_v0[local_indices_v0[i]] )
-            // からvertex_owner_c(v0)とrecv_reorder_id_v0[local_indices_v0[i]]を取り出す
-            const auto c = local / max_local_verts_;
-            const auto reordered = local % max_local_verts_;
-            reorder_to_send[(offsets[c])++] = reordered;
+        for (int64_t i = bitmap_block_begin; i < bitmap_block_end; ++i) {
+          BitmapType bitmap = g.row_bitmap_[i];
+          for (int64_t j = 0; j < NBPE; ++j) {
+            // ビットが立っているかどうか
+            const auto mask = BitmapType(1) << j;
+            if (bitmap & mask) {
+              const auto local = i * NBPE + j;
+              // local = (max_local_verts_ ) * vertex_owner_c(v0) +
+              // (recv_reorder_id_v0[local_indices_v0[i]] )
+              // からvertex_owner_c(v0)とrecv_reorder_id_v0[local_indices_v0[i]]を取り出す
+              const auto c = local / max_local_verts_;
+              const auto reordered = local % max_local_verts_;
+              reorder_to_send[(offsets[c])++] = reordered;
+            }
           }
         }
-      }
-    }
-    LocalVertexType* recv_reorder = scatter.scatter(reorder_to_send);
-    const int num_recv_reorder = scatter.get_recv_count();
-    LocalVertexType* send_invert = static_cast<LocalVertexType*>(
-        xMPI_Alloc_mem(num_recv_reorder * sizeof(LocalVertexType)));
+      }  // #pragma omp parallel
+      LocalVertexType* recv_reorder = scatter.scatter(reorder_to_send);
+      const int num_recv_reorder = scatter.get_recv_count();
+      LocalVertexType* send_invert = static_cast<LocalVertexType*>(
+          xMPI_Alloc_mem(num_recv_reorder * sizeof(LocalVertexType)));
 #pragma omp parallel for
-    for (int i = 0; i < num_recv_reorder; ++i) {
+      for (int i = 0; i < num_recv_reorder; ++i) {
 #if SMALL_REORDER_BIT
-      const int64_t group_id = recv_reorder[i] / max_local_group_verts_;
-      const int64_t group_offset = group_id << reorder_bits_;
-      const int reorder_id = recv_reorder[i] % max_local_group_verts_;
-      send_invert[i] = g.invert_map_[group_offset + reorder_id];
+        const int64_t group_id = recv_reorder[i] / max_local_group_verts_;
+        const int64_t group_offset = group_id << reorder_bits_;
+        const int reorder_id = recv_reorder[i] % max_local_group_verts_;
+        send_invert[i] = g.invert_map_[group_offset + reorder_id];
 #else
-      send_invert[i] = g.invert_map_[recv_reorder[i]];
+        send_invert[i] = g.invert_map_[recv_reorder[i]];
 #endif
-    }
-    LocalVertexType* recv_invert = scatter.gather(send_invert);
+      }
+      const int num_send_reorder = scatter.get_send_count();
+      LocalVertexType* recv_invert = scatter.gather(send_invert);
 #pragma omp parallel for
-    for (TwodVertex i = 0; i < num_non_zero_rows; ++i) {
-      g.orig_vertexes_[i] = recv_invert[i];
+      for (TwodVertex i = 0; i < num_send_reorder; ++i) {
+        g.orig_vertexes_[orig_vertexes_offset + i] = recv_invert[i];
+      }
+      orig_vertexes_offset += num_send_reorder;
+      scatter.free(recv_reorder);
+      scatter.free(send_invert);
+      scatter.free(recv_invert);
+      if (mpi.isMaster())
+        print_with_prefix("Iteration %d finished.", loop_count);
     }
-    scatter.free(recv_reorder);
-    scatter.free(send_invert);
-    scatter.free(recv_invert);
+    // orig_vertexes_offset must be same as num_non_zero_rows.
+    if(orig_vertexes_offset != num_non_zero_rows) {
+      print_with_prefix("orig_vertexes_offset != num_non_zero_rows!!!");
+    }
     MPI_Free_mem(reorder_to_send);
   }
 
@@ -2072,7 +2088,7 @@ class GraphConstructor2DCSR {
           (counts[vertex_owner(v0)])++;
           (counts[vertex_owner(v1)])++;
         }  // #pragma omp for schedule(static)
-      }    // #pragma omp parallel
+      }  // #pragma omp parallel
 
       scatter.sum();
 
@@ -2104,7 +2120,7 @@ class GraphConstructor2DCSR {
           // assert (offsets[edge_owner(v1,v0)] < 2 * FILE_CHUNKSIZE);
           edges_to_send[(offsets[vertex_owner(v1)])++] = v1_swizzled.value;
         }  // #pragma omp for schedule(static)
-      }    // #pragma omp parallel
+      }  // #pragma omp parallel
 
 #if NETWORK_PROBLEM_AYALISYS
       if (mpi.isMaster()) print_with_prefix("MPI_Alltoall...");
@@ -2260,10 +2276,8 @@ class GraphConstructor2DCSR {
 
   // Counts and prints the number of low-degree vertices, particularly for
   // calculating the memory size saved by multilevel bitmap compression.
-  void printLowDegreeVertexCounts(
-    const int64_t non_zero_rows,
-    const int64_t* const row_starts
-  ) {
+  void printLowDegreeVertexCounts(const int64_t non_zero_rows,
+                                  const int64_t* const row_starts) {
     std::vector<int64_t> num_edge_count(10);
 #pragma omp parallel for
     for (int64_t non_zero_idx = 0; non_zero_idx < non_zero_rows;
@@ -2271,11 +2285,11 @@ class GraphConstructor2DCSR {
       int64_t e_start = row_starts[non_zero_idx];
       int64_t e_end = row_starts[non_zero_idx + 1];
       int64_t num_edges = e_end - e_start;
-      if(num_edges < (int64_t)num_edge_count.size()) {
+      if (num_edges < (int64_t)num_edge_count.size()) {
         __sync_fetch_and_add(&num_edge_count[num_edges], 1);
       }
     }
-    if(num_edge_count[0] != 0) {
+    if (num_edge_count[0] != 0) {
       // `num_edge_count` should be zero because `row_starts` should not have
       // any values corresponding to vertices without incident edges.
       print_with_prefix("WARNING: num_edge_count[0] != 0");
@@ -2284,10 +2298,10 @@ class GraphConstructor2DCSR {
     num_edge_count[0] = non_zero_rows;
     std::vector<int64_t> sum_edge_count(10);
     MPI_Reduce(num_edge_count.data(), sum_edge_count.data(),
-               (int)num_edge_count.size(), MpiTypeOf<int64_t>::type, MPI_SUM,
-               0, mpi.comm_2d);
-    if(mpi.isMaster()) {
-      for(int i = 0; i < (int)sum_edge_count.size(); ++i) {
+               (int)num_edge_count.size(), MpiTypeOf<int64_t>::type, MPI_SUM, 0,
+               mpi.comm_2d);
+    if (mpi.isMaster()) {
+      for (int i = 0; i < (int)sum_edge_count.size(); ++i) {
         if (i >= 1) {
           sum_edge_count[i] = sum_edge_count[i - 1] - sum_edge_count[i];
         }
@@ -2324,7 +2338,8 @@ class GraphConstructor2DCSR {
     BitmapType* sub_row_bitmap = static_cast<BitmapType*>(
         cache_aligned_xcalloc(sub_row_bitmap_length * sizeof(BitmapType)));
     VERVOSE(if (mpi.isMaster()) {
-      print_with_prefix("sub_row_bitmap_length %f M", to_mega(sub_row_bitmap_length));
+      print_with_prefix("sub_row_bitmap_length %f M",
+                        to_mega(sub_row_bitmap_length));
     });
 #endif  // #if COMPRESS_ROW_STARTS
 
@@ -2403,7 +2418,7 @@ class GraphConstructor2DCSR {
 
 #if VERVOSE_MODE
     printLowDegreeVertexCounts(non_zero_rows, row_starts);
-#endif // #if VERVOSE_MODE
+#endif  // #if VERVOSE_MODE
 
     g.row_starts_ = row_starts;
 #if COMPRESS_ROW_STARTS
@@ -2785,7 +2800,7 @@ class GraphConstructor2DCSR {
           (counts[edge_owner(v0, v1)])++;
           (counts[edge_owner(v1, v0)])++;
         }  // #pragma omp for schedule(static)
-      }    // #pragma omp parallel
+      }  // #pragma omp parallel
 
       scatter.sum();
 
