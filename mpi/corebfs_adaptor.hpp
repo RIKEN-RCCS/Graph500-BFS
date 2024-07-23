@@ -146,10 +146,30 @@ static std::vector<UnweightedPackedEdge> convert_upper(
   return ret;
 }
 
-static void shuffle_edges(std::vector<edge_2d> *const edges_2d) {
-  std::random_device rd;
-  std::mt19937_64 g(rd());
-  std::shuffle(edges_2d->begin(), edges_2d->end(), g);
+template <typename RandomIterator>
+void shuffle_parallel(const RandomIterator first, const RandomIterator last) {
+  using diff_t = typename std::iterator_traits<RandomIterator>::difference_type;
+  using distr_t = std::uniform_int_distribution<diff_t>;
+  using param_t = typename distr_t::param_type;
+
+  const diff_t len = last - first;
+  const int n_threads = omp_get_max_threads();
+
+#pragma omp parallel
+  {
+    const int tid = omp_get_thread_num();
+    std::random_device rd;
+    std::mt19937_64 g(rd());
+    std::uniform_int_distribution<diff_t> distr;
+
+    for (diff_t i = tid; i < len; i += n_threads) {
+      const diff_t rest = len - 1 - i;
+      const diff_t j = i + distr(g, param_t(0, rest / n_threads)) * n_threads;
+      assert(j >= i);
+      assert(j < len);
+      std::swap(first[i], first[j]);
+    }
+  }
 }
 
 //
@@ -354,7 +374,7 @@ static corebfs_index preprocess(const int scale, edge_storage *const input,
   INDEXED_BFS_LOG_RSS();
 
   LOG_I << "Shuffling core edges...";
-  shuffle_edges(&edges_2d);
+  shuffle_parallel(edges_2d.begin(), edges_2d.end());
 
   LOG_I << "Writing core edges...";
   write(d, edges_2d, output);
