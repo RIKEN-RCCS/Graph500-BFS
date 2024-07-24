@@ -352,7 +352,7 @@ void redistribute_edge_2d(EdgeList* edge_list,
         const int64_t v0 = edge_data[i].v0();
         const int64_t v1 = edge_data[i].v1();
         // assert (offsets[edge_owner(v0,v1)] < 2 * FILE_CHUNKSIZE);
-        edges_to_send[(offsets[edge_owner(v0, v1)])++].set(v0, v1);
+        edges_to_send[(offsets[edge_owner(v0, v1)])++] = EdgeType(v0, v1);
       }  // #pragma omp for schedule(static)
     }  // #pragma omp parallel
 
@@ -365,8 +365,6 @@ void redistribute_edge_2d(EdgeList* edge_list,
       assert(vertex_owner_r(v0) == mpi.rank_2dr);
       assert(vertex_owner_c(v1) == mpi.rank_2dc);
     }
-#undef VERTEX_OWNER_R
-#undef VERTEX_OWNER_C
 #endif
     edge_list->write(recv_edges, num_recv_edges);
     scatter.free(recv_edges);
@@ -376,6 +374,86 @@ void redistribute_edge_2d(EdgeList* edge_list,
   edge_list->endWrite();
   edge_list->endRead();
   MPI_Free_mem(edges_to_send);
+}
+
+// 1. Removes self-loops.
+// 2. Symmetrize edges.
+// 3. Transfers edges to the owner of each of them.
+// 4. Estiamte SCALE parameter.
+// Input `edge_list` is already distributed in 2d. Inter-node communication occurs only for "transposing" edges.
+template <typename EdgeList>
+int make_symmetry_edge_list(EdgeList* edge_list, EdgeList* edge_list_sym) {
+  typedef typename EdgeList::edge_type EdgeType;
+  ScatterContext scatter(mpi.comm_2d);
+  EdgeType* edges_to_send = static_cast<EdgeType*>(
+      xMPI_Alloc_mem(2 * EdgeList::CHUNK_SIZE * sizeof(EdgeType)));
+  int num_loops = edge_list->beginRead(true);
+  edge_list_sym->beginWrite();
+  uint64_t max_vertex = 0;
+
+  for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
+    EdgeType* edge_data;
+    const int edge_data_length = edge_list->read(&edge_data);
+
+#pragma omp parallel
+    {
+      int* restrict counts = scatter.get_counts();
+
+#pragma omp for schedule(static) reduction(| : max_vertex)
+      for (int i = 0; i < edge_data_length; ++i) {
+        const int64_t v0 = edge_data[i].v0();
+        const int64_t v1 = edge_data[i].v1();
+        if(v0 == v1) continue;
+        max_vertex |= (uint64_t)(v0 | v1);
+        (counts[edge_owner(v0, v1)])++;
+        (counts[edge_owner(v1, v0)])++;
+      }  // #pragma omp for schedule(static)
+
+#pragma omp master
+      {
+        scatter.sum();
+      }  // #pragma omp master
+#pragma omp barrier
+      int* restrict offsets = scatter.get_offsets();
+
+#pragma omp for schedule(static)
+      for (int i = 0; i < edge_data_length; ++i) {
+        const int64_t v0 = edge_data[i].v0();
+        const int64_t v1 = edge_data[i].v1();
+        if(v0 == v1) continue;
+        edges_to_send[(offsets[edge_owner(v0, v1)])++] = EdgeType(v0, v1);
+        edges_to_send[(offsets[edge_owner(v1, v0)])++] = EdgeType(v1, v0);
+      }  // #pragma omp for schedule(static)
+    }  // #pragma omp parallel
+
+    EdgeType* recv_edges = scatter.scatter(edges_to_send);
+    const int64_t num_recv_edges = scatter.get_recv_count();
+#ifndef NDEBUG
+    for (int64_t i = 0; i < num_recv_edges; ++i) {
+      const int64_t v0 = recv_edges[i].v0();
+      const int64_t v1 = recv_edges[i].v1();
+      assert(vertex_owner_r(v1) == mpi.rank_2dr);
+      assert(vertex_owner_c(v0) == mpi.rank_2dc);
+    }
+#endif
+    edge_list_sym->write(recv_edges, num_recv_edges);
+    scatter.free(recv_edges);
+
+    if (mpi.isMaster()) print_with_prefix("Iteration %d finished.", loop_count);
+  }
+  edge_list_sym->endWrite();
+  edge_list->endRead();
+  MPI_Free_mem(edges_to_send);
+  
+  uint64_t tmp_send = max_vertex;
+  MPI_Allreduce(&tmp_send, &max_vertex, 1, MpiTypeOf<uint64_t>::type,
+                MPI_BOR, mpi.comm_2d);
+
+  const int log_max_vertex = get_msb_index(max_vertex) + 1;
+  if (mpi.isMaster())
+    print_with_prefix("Estimated SCALE = %d.", log_max_vertex);
+
+  return log_max_vertex;
 }
 
 template <typename GraphType>

@@ -49,7 +49,7 @@ class EdgeListStorage {
   static const int CHUNK_SIZE = CHUNK_SIZE_;
   typedef EdgeType edge_type;
 
-  EdgeListStorage(int64_t nLocalEdges, const char* filepath = NULL)
+  EdgeListStorage(int64_t nLocalEdges, const char* filepath = NULL, const char* suffix = "")
       : data_in_file_(false),
         edge_memory_(NULL),
 #if EDGE_LIST_STORAGE_THREAD_IO
@@ -91,7 +91,7 @@ class EdgeListStorage {
           cache_aligned_xmalloc(edge_memory_size_ * sizeof(EdgeType)));
     } else {
       data_in_file_ = true;
-      sprintf(filepath_, "%s-%03d", filepath, mpi.rank_2d);
+      sprintf(filepath_, "%s%s-%03d", filepath, suffix, mpi.rank_2d);
 #if EDGE_LIST_STORAGE_THREAD_IO
       edge_fd_ = open(filepath_, O_CREAT | O_RDWR | O_TRUNC, S_IRUSR | S_IWUSR);
       if (edge_fd_ < 0)
@@ -689,7 +689,7 @@ class GraphGeneratorBase {
 #pragma omp for
         for (int64_t edge_index = start_edge; edge_index < end_edge;
              ++edge_index) {
-          edge_buffer[edge_index - start_edge].set(
+          edge_buffer[edge_index - start_edge] = EdgeType(
               this->scramble(edge_index + 1),
               this->scramble((edge_index + 1) / 2));
         }
@@ -699,13 +699,13 @@ class GraphGeneratorBase {
         for (int64_t edge_index = start_edge;
              edge_index < std::min(end_edge, num_initial_edges_ - 1);
              ++edge_index) {
-          edge_buffer[edge_index - start_edge].set(
+          edge_buffer[edge_index - start_edge] = EdgeType(
               this->scramble(edge_index), this->scramble(edge_index + 1));
         }
 #pragma omp master
         if (end_edge == num_initial_edges_) {
           // generate the last initial edge
-          edge_buffer[end_edge - start_edge].set(this->scramble(end_edge),
+          edge_buffer[end_edge - start_edge] = EdgeType(this->scramble(end_edge),
                                                  this->scramble(0));
         }
         break;
@@ -886,7 +886,7 @@ class RmatGraphGenerator : public GraphGenerator<EdgeType> {
       base_src += nverts * src_offset;
       base_tgt += nverts * tgt_offset;
     }
-    result->set(this->scramble(base_src), this->scramble(base_tgt));
+    *result = EdgeType(this->scramble(base_src), this->scramble(base_tgt));
   }
 };
 

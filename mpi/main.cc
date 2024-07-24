@@ -412,41 +412,27 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
   generate_graph_spec2010(&edge_list, SCALE, edgefactor);
   generation_time = MPI_Wtime() - generation_time;
 
-#ifdef EDGE_LIST_PREDISTRIBUTION
+  if (mpi.isMaster()) print_with_prefix("Graph construction");
+
   //
-  // If EDGE_LIST_PREDISTRIBUTION is disabled, the result of
-  // `redistribute_edge_2d()` is used only in vaidation. Hence,
-  // `redistribution_time` is considered to be part of validation time and
-  // separated from `construction_time`.
-  // However, if EDGE_LIST_PREDISTRIBUTION is enabled, the result of
-  // `redistribute_edge_2d()` is used in the graph construction, and hence its
+  // The result of `redistribute_edge_2d()` is used in the graph construction, and hence its
   // processing time is considered to be part of `construction_time`.
   //
-  const double redistribution_time = 0.0;
-  const double construction_start = MPI_Wtime();
-
-  if (mpi.isMaster()) print_with_prefix("Redistributing edge list...");
-  redistribute_edge_2d(&edge_list);
-
-  if (mpi.isMaster()) print_with_prefix("Graph construction");
-  // Create BFS instance and the *COMMUNICATION THREAD*.
-  BfsOnCPU *benchmark = new BfsOnCPU();
-  benchmark->construct(SCALE, edgefactor, corebfs_enabled, &edge_list);
-
-  const double construction_time = MPI_Wtime() - construction_start;
-#else
-  if (mpi.isMaster()) print_with_prefix("Graph construction");
-  // Create BFS instance and the *COMMUNICATION THREAD*.
-  BfsOnCPU *benchmark = new BfsOnCPU();
   double construction_time = MPI_Wtime();
-  benchmark->construct(SCALE, edgefactor, corebfs_enabled, &edge_list);
+  // Prepare edge list
+  EdgeListStorage<UnweightedPackedEdge> sym_edge_list(
+      (int64_t(1) << SCALE) * edgefactor / mpi.size_2d * 2, getenv("TMPFILE"), "-sym");
+  if (mpi.isMaster()) print_with_prefix("Distributing edge list...");
+  redistribute_edge_2d(&edge_list);
+  if (mpi.isMaster()) print_with_prefix("Making symmetry edge list...");
+  const auto estimated_scale = make_symmetry_edge_list(&edge_list, &sym_edge_list);
+
+  // Create BFS instance and the *COMMUNICATION THREAD*.
+  BfsOnCPU *benchmark = new BfsOnCPU();
+  benchmark->construct(estimated_scale, corebfs_enabled, &sym_edge_list);
   construction_time = MPI_Wtime() - construction_time;
 
-  if (mpi.isMaster()) print_with_prefix("Redistributing edge list...");
-  double redistribution_time = MPI_Wtime();
-  redistribute_edge_2d(&edge_list);
-  redistribution_time = MPI_Wtime() - redistribution_time;
-#endif
+  double redistribution_time = 0.0;
 
   int64_t bfs_roots[num_bfs_roots];
   const int64_t max_used_vertex = find_max_used_vertex(benchmark->graph_);
