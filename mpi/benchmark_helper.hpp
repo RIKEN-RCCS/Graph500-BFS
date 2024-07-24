@@ -305,7 +305,7 @@ void redistribute_edge_2d(EdgeList* edge_list,
     edge_list->write(recv_edges, num_recv_edges);
     scatter.free(recv_edges);
 
-    if (mpi.isMaster()) print_with_prefix("Iteration %d finished.", loop_count);
+    if (mpi.isMaster()) print_with_prefix("[redistribute_edge_2d] Completed %d/%d", loop_count + 1, num_loops);
   }
   if (mpi.isMaster()) print_with_prefix("Finished.");
   edge_list->endWrite();
@@ -369,7 +369,7 @@ void redistribute_edge_2d(EdgeList* edge_list,
     edge_list->write(recv_edges, num_recv_edges);
     scatter.free(recv_edges);
 
-    if (mpi.isMaster()) print_with_prefix("Iteration %d finished.", loop_count);
+    if (mpi.isMaster()) print_with_prefix("[redistribute_edge_2d] Completed %d/%d", loop_count + 1, num_loops);
   }
   edge_list->endWrite();
   edge_list->endRead();
@@ -439,7 +439,7 @@ int make_symmetry_edge_list(EdgeList* edge_list, EdgeList* edge_list_sym) {
     edge_list_sym->write(recv_edges, num_recv_edges);
     scatter.free(recv_edges);
 
-    if (mpi.isMaster()) print_with_prefix("Iteration %d finished.", loop_count);
+    if (mpi.isMaster()) print_with_prefix("[make_symmetry_edge_list] Completed %d/%d", loop_count + 1, num_loops);
   }
   edge_list_sym->endWrite();
   edge_list->endRead();

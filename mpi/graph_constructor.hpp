@@ -1209,8 +1209,7 @@ class GraphConstructor2DCSR {
 
       scatter.free(recv_edges);
 
-      if (mpi.isMaster())
-        print_with_prefix("Iteration %d finished.", loop_count);
+      if (mpi.isMaster()) print_with_prefix("[scatterAndScanEdges] Completed %d/%d", loop_count + 1, num_loops);
       INDEXED_BFS_LOG_RSS();
     }
     sym_edge_list->endRead();
@@ -1788,8 +1787,6 @@ class GraphConstructor2DCSR {
         edges_to_add[i] = EdgeType(v0_src.value, v1_dst.value);
       }  // #pragma omp parallel for schedule(static)
 
-      if (mpi.isMaster()) print_with_prefix("Convert vertex id...");
-
 #ifdef SMALL_REORDER_BIT
       MpiCol::gather(SourceConverter(edges_to_add, src_converted, g.reorder_map_,
                                      org_local_bits_, local_bits_,
@@ -1814,11 +1811,10 @@ class GraphConstructor2DCSR {
                      edge_data_length, mpi.comm_2dc);
 #endif
 
-      if (mpi.isMaster()) print_with_prefix("Add edges...");
+      INDEXED_BFS_LOG_RSS();
       addEdges(src_converted, tgt_converted, edge_data_length, g);
 
-      if (mpi.isMaster())
-        print_with_prefix("Iteration %d finished.", loop_count);
+      if (mpi.isMaster()) print_with_prefix("[scatterAndStore] Completed %d/%d", loop_count + 1, num_loops);
       malloc_trim(0);
     }
 
