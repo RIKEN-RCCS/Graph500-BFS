@@ -114,8 +114,8 @@ class BfsBase {
   }
 
   template <typename EdgeList>
-  void construct(const int scale,
-                 const bool corebfs_enabled, EdgeList* sym_edge_list) {
+  void construct(const int scale, const bool corebfs_enabled,
+                 EdgeList* sym_edge_list) {
     // minimun requirement of CQ
     // CPU: MINIMUN_SIZE_OF_CQ_BITMAP words -> MINIMUN_SIZE_OF_CQ_BITMAP *
     // NUMBER_PACKING_EDGE_LISTS * mpi.size_2dc GPU: THREADS_PER_BLOCK words ->
@@ -130,9 +130,11 @@ class BfsBase {
     }
 
     // Create temporary EdgeListStrorage for storing core edges
-    EdgeListStorage<UnweightedPackedEdge> core_edge_list(sym_edge_list->num_local_edges(), getenv("TMPFILE"), "-core");
+    EdgeListStorage<UnweightedPackedEdge> core_edge_list(
+        sym_edge_list->num_local_edges(), getenv("TMPFILE"), "-core");
 
-    corebfs_ = corebfs_adaptor::preprocess(scale, sym_edge_list, &core_edge_list);
+    corebfs_ =
+        corebfs_adaptor::preprocess(scale, sym_edge_list, &core_edge_list);
     constructor.construct(scale, &core_edge_list, log_local_verts_unit, graph_);
   }
 

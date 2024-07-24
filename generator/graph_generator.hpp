@@ -49,7 +49,8 @@ class EdgeListStorage {
   static const int CHUNK_SIZE = CHUNK_SIZE_;
   typedef EdgeType edge_type;
 
-  EdgeListStorage(int64_t nLocalEdges, const char* filepath = NULL, const char* suffix = "")
+  EdgeListStorage(int64_t nLocalEdges, const char* filepath = NULL,
+                  const char* suffix = "")
       : data_in_file_(false),
         edge_memory_(NULL),
 #if EDGE_LIST_STORAGE_THREAD_IO
@@ -689,9 +690,9 @@ class GraphGeneratorBase {
 #pragma omp for
         for (int64_t edge_index = start_edge; edge_index < end_edge;
              ++edge_index) {
-          edge_buffer[edge_index - start_edge] = EdgeType(
-              this->scramble(edge_index + 1),
-              this->scramble((edge_index + 1) / 2));
+          edge_buffer[edge_index - start_edge] =
+              EdgeType(this->scramble(edge_index + 1),
+                       this->scramble((edge_index + 1) / 2));
         }
         break;
       case InitialEdgeType::HAMILTONIAN_CYCLE:
@@ -705,8 +706,8 @@ class GraphGeneratorBase {
 #pragma omp master
         if (end_edge == num_initial_edges_) {
           // generate the last initial edge
-          edge_buffer[end_edge - start_edge] = EdgeType(this->scramble(end_edge),
-                                                 this->scramble(0));
+          edge_buffer[end_edge - start_edge] =
+              EdgeType(this->scramble(end_edge), this->scramble(0));
         }
         break;
       case InitialEdgeType::NONE:

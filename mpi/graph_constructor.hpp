@@ -1006,7 +1006,8 @@ class GraphConstructor2DCSR {
     }
   }
 
-  void construct(const int scale, EdgeList* sym_edge_list, int log_local_verts_unit, GraphType& g) {
+  void construct(const int scale, EdgeList* sym_edge_list,
+                 int log_local_verts_unit, GraphType& g) {
     TRACER(construction);
     log_local_verts_unit_ =
         std::max<int>(log_local_verts_unit, LOG_EDGE_PART_SIZE);
@@ -1209,7 +1210,9 @@ class GraphConstructor2DCSR {
 
       scatter.free(recv_edges);
 
-      if (mpi.isMaster()) print_with_prefix("[scatterAndScanEdges] Completed %d/%d", loop_count + 1, num_loops);
+      if (mpi.isMaster())
+        print_with_prefix("[scatterAndScanEdges] Completed %d/%d",
+                          loop_count + 1, num_loops);
       INDEXED_BFS_LOG_RSS();
     }
     sym_edge_list->endRead();
@@ -1777,25 +1780,27 @@ class GraphConstructor2DCSR {
       const int local_bits = org_local_bits_;
 
 #pragma omp parallel for
-        for (int i = 0; i < edge_data_length; ++i) {
-          const int64_t v0 = edge_data[i].v0();
-          const int64_t v1 = edge_data[i].v1();
+      for (int i = 0; i < edge_data_length; ++i) {
+        const int64_t v0 = edge_data[i].v0();
+        const int64_t v1 = edge_data[i].v1();
         const SeparatedId v0_src(vertex_owner_c(v0), vertex_local(v0),
-                                local_bits);
+                                 local_bits);
         const SeparatedId v1_dst(vertex_owner_r(v1), vertex_local(v1),
-                                local_bits);
+                                 local_bits);
         edges_to_add[i] = EdgeType(v0_src.value, v1_dst.value);
       }  // #pragma omp parallel for schedule(static)
 
 #ifdef SMALL_REORDER_BIT
-      MpiCol::gather(SourceConverter(edges_to_add, src_converted, g.reorder_map_,
-                                     org_local_bits_, local_bits_,
-                                     reorder_bits_, g.num_group_verts_),
-                     edge_data_length, mpi.comm_2dr);
+      MpiCol::gather(
+          SourceConverter(edges_to_add, src_converted, g.reorder_map_,
+                          org_local_bits_, local_bits_, reorder_bits_,
+                          g.num_group_verts_),
+          edge_data_length, mpi.comm_2dr);
 #else
-      MpiCol::gather(SourceConverter(edges_to_add, src_converted, g.reorder_map_,
-                                     org_local_bits_, local_bits_),
-                     edge_data_length, mpi.comm_2dr);
+      MpiCol::gather(
+          SourceConverter(edges_to_add, src_converted, g.reorder_map_,
+                          org_local_bits_, local_bits_),
+          edge_data_length, mpi.comm_2dr);
 #endif
 
 #ifdef SMALL_REORDER_BIT
@@ -1805,16 +1810,18 @@ class GraphConstructor2DCSR {
                           reorder_bits_, g.num_group_verts_),
           edge_data_length, mpi.comm_2dc);
 #else
-      MpiCol::gather(TargetConverter(edges_to_add, tgt_converted, g.reorder_map_,
-                                     org_local_bits_, local_bits_,
-                                     g.r_bits_ + local_bits_),
+      MpiCol::gather(TargetConverter(edges_to_add, tgt_converted,
+                                     g.reorder_map_, org_local_bits_,
+                                     local_bits_, g.r_bits_ + local_bits_),
                      edge_data_length, mpi.comm_2dc);
 #endif
 
       INDEXED_BFS_LOG_RSS();
       addEdges(src_converted, tgt_converted, edge_data_length, g);
 
-      if (mpi.isMaster()) print_with_prefix("[scatterAndStore] Completed %d/%d", loop_count + 1, num_loops);
+      if (mpi.isMaster())
+        print_with_prefix("[scatterAndStore] Completed %d/%d", loop_count + 1,
+                          num_loops);
       malloc_trim(0);
     }
 

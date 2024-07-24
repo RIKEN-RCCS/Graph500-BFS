@@ -305,7 +305,9 @@ void redistribute_edge_2d(EdgeList* edge_list,
     edge_list->write(recv_edges, num_recv_edges);
     scatter.free(recv_edges);
 
-    if (mpi.isMaster()) print_with_prefix("[redistribute_edge_2d] Completed %d/%d", loop_count + 1, num_loops);
+    if (mpi.isMaster())
+      print_with_prefix("[redistribute_edge_2d] Completed %d/%d",
+                        loop_count + 1, num_loops);
   }
   if (mpi.isMaster()) print_with_prefix("Finished.");
   edge_list->endWrite();
@@ -369,7 +371,9 @@ void redistribute_edge_2d(EdgeList* edge_list,
     edge_list->write(recv_edges, num_recv_edges);
     scatter.free(recv_edges);
 
-    if (mpi.isMaster()) print_with_prefix("[redistribute_edge_2d] Completed %d/%d", loop_count + 1, num_loops);
+    if (mpi.isMaster())
+      print_with_prefix("[redistribute_edge_2d] Completed %d/%d",
+                        loop_count + 1, num_loops);
   }
   edge_list->endWrite();
   edge_list->endRead();
@@ -380,7 +384,8 @@ void redistribute_edge_2d(EdgeList* edge_list,
 // 2. Symmetrize edges.
 // 3. Transfers edges to the owner of each of them.
 // 4. Estiamte SCALE parameter.
-// Input `edge_list` is already distributed in 2d. Inter-node communication occurs only for "transposing" edges.
+// Input `edge_list` is already distributed in 2d. Inter-node communication
+// occurs only for "transposing" edges.
 template <typename EdgeList>
 int make_symmetry_edge_list(EdgeList* edge_list, EdgeList* edge_list_sym) {
   typedef typename EdgeList::edge_type EdgeType;
@@ -403,16 +408,14 @@ int make_symmetry_edge_list(EdgeList* edge_list, EdgeList* edge_list_sym) {
       for (int i = 0; i < edge_data_length; ++i) {
         const int64_t v0 = edge_data[i].v0();
         const int64_t v1 = edge_data[i].v1();
-        if(v0 == v1) continue;
+        if (v0 == v1) continue;
         max_vertex |= (uint64_t)(v0 | v1);
         (counts[edge_owner(v0, v1)])++;
         (counts[edge_owner(v1, v0)])++;
       }  // #pragma omp for schedule(static)
 
 #pragma omp master
-      {
-        scatter.sum();
-      }  // #pragma omp master
+      { scatter.sum(); }
 #pragma omp barrier
       int* restrict offsets = scatter.get_offsets();
 
@@ -420,7 +423,7 @@ int make_symmetry_edge_list(EdgeList* edge_list, EdgeList* edge_list_sym) {
       for (int i = 0; i < edge_data_length; ++i) {
         const int64_t v0 = edge_data[i].v0();
         const int64_t v1 = edge_data[i].v1();
-        if(v0 == v1) continue;
+        if (v0 == v1) continue;
         edges_to_send[(offsets[edge_owner(v0, v1)])++] = EdgeType(v0, v1);
         edges_to_send[(offsets[edge_owner(v1, v0)])++] = EdgeType(v1, v0);
       }  // #pragma omp for schedule(static)
@@ -439,15 +442,17 @@ int make_symmetry_edge_list(EdgeList* edge_list, EdgeList* edge_list_sym) {
     edge_list_sym->write(recv_edges, num_recv_edges);
     scatter.free(recv_edges);
 
-    if (mpi.isMaster()) print_with_prefix("[make_symmetry_edge_list] Completed %d/%d", loop_count + 1, num_loops);
+    if (mpi.isMaster())
+      print_with_prefix("[make_symmetry_edge_list] Completed %d/%d",
+                        loop_count + 1, num_loops);
   }
   edge_list_sym->endWrite();
   edge_list->endRead();
   MPI_Free_mem(edges_to_send);
-  
+
   uint64_t tmp_send = max_vertex;
-  MPI_Allreduce(&tmp_send, &max_vertex, 1, MpiTypeOf<uint64_t>::type,
-                MPI_BOR, mpi.comm_2d);
+  MPI_Allreduce(&tmp_send, &max_vertex, 1, MpiTypeOf<uint64_t>::type, MPI_BOR,
+                mpi.comm_2d);
 
   const int log_max_vertex = get_msb_index(max_vertex) + 1;
   if (mpi.isMaster())

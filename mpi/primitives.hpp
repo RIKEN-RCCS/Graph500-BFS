@@ -59,8 +59,8 @@ struct UnweightedPackedEdge {
   typedef int no_weight;
 
   UnweightedPackedEdge() = default;
-  UnweightedPackedEdge(const UnweightedPackedEdge &) = default;
-  
+  UnweightedPackedEdge(const UnweightedPackedEdge&) = default;
+
   UnweightedPackedEdge(int64_t v0, int64_t v1) {
     v0_low_ = static_cast<uint32_t>(v0);
     v1_low_ = static_cast<uint32_t>(v1);
