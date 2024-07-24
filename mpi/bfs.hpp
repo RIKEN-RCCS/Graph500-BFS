@@ -114,8 +114,8 @@ class BfsBase {
   }
 
   template <typename EdgeList>
-  void construct(const int scale, const int edgefactor,
-                 const bool corebfs_enabled, EdgeList* edge_list) {
+  void construct(const int scale, const bool corebfs_enabled,
+                 EdgeList* sym_edge_list) {
     // minimun requirement of CQ
     // CPU: MINIMUN_SIZE_OF_CQ_BITMAP words -> MINIMUN_SIZE_OF_CQ_BITMAP *
     // NUMBER_PACKING_EDGE_LISTS * mpi.size_2dc GPU: THREADS_PER_BLOCK words ->
@@ -124,37 +124,18 @@ class BfsBase {
     int log_local_verts_unit =
         get_msb_index(std::max<int>(BFELL_SORT, NBPE) * 8);
     detail::GraphConstructor2DCSR<EdgeList> constructor;
-    const int64_t n_edges = (int64_t(1) << scale) * edgefactor / mpi.size_2d;
     if (!corebfs_enabled) {
-#ifdef EDGE_LIST_PREDISTRIBUTION
-      constructor.construct_fewer_edge_distributions(
-          n_edges, edge_list, log_local_verts_unit, graph_);
-#else
-      constructor.construct(n_edges, edge_list, log_local_verts_unit, graph_);
-#endif
+      constructor.construct(scale, sym_edge_list, log_local_verts_unit, graph_);
       return;
     }
 
     // Create temporary EdgeListStrorage for storing core edges
+    EdgeListStorage<UnweightedPackedEdge> core_edge_list(
+        sym_edge_list->num_local_edges(), getenv("TMPFILE"), "-core");
 
-    std::string path;
-    const char* path_ptr = nullptr;
-    if (getenv("TMPFILE") != nullptr) {
-      path = path + getenv("TMPFILE") + "-core";
-      path_ptr = path.c_str();
-    }
-    EdgeListStorage<UnweightedPackedEdge> core_edge_list(n_edges, path_ptr);
-
-    corebfs_ = corebfs_adaptor::preprocess(scale, edge_list, &core_edge_list);
-    INDEXED_BFS_LOG_RSS();  // Print in the outside of `preprocess()`'s scope
-
-#ifdef EDGE_LIST_PREDISTRIBUTION
-    constructor.construct_fewer_edge_distributions(
-        n_edges, &core_edge_list, log_local_verts_unit, graph_);
-#else
-    constructor.construct(n_edges, &core_edge_list, log_local_verts_unit,
-                          graph_);
-#endif
+    corebfs_ =
+        corebfs_adaptor::preprocess(scale, sym_edge_list, &core_edge_list);
+    constructor.construct(scale, &core_edge_list, log_local_verts_unit, graph_);
   }
 
   void prepare_bfs(int validation_level, bool pre_exec, bool real_benchmark,

@@ -384,7 +384,6 @@ public:
   // 1. Transfers edges to the owner of each of them and appends the reveiced
   //    edges to `edge_2ds`.
   // 2. Removes self-loops.
-  // 3. Symmetrize edges.
   //
   // `convert` is used to convert the value type of `RandomAccessIterator` to
   // `graph::edge`.
@@ -420,13 +419,11 @@ public:
         for (difference_type i = 0; i < n; ++i) {
           const edge &e = convert(first[i]);
           if (e.source() != e.target()) {            // Remove self-loops
-            for (const auto &s : {e, e.reverse()}) { // Symmetrize
-              const int rank = dist_.owner_rank(s);
-              if (rank == dist_.all().rank()) {
-                local_counts[tid] += 1;
-              } else {
-                send_counts[rank].fetch_add(1);
-              }
+            const int rank = dist_.owner_rank(e);
+            if (rank == dist_.all().rank()) {
+              local_counts[tid] += 1;
+            } else {
+              send_counts[rank].fetch_add(1);
             }
           }
         }
@@ -465,15 +462,13 @@ public:
         for (difference_type i = 0; i < n; ++i) {
           const edge &e = convert(first[i]);
           if (e.source() != e.target()) {
-            for (const auto &s : {e, e.reverse()}) {
-              const int rank = dist_.owner_rank(s);
-              if (rank == dist_.all().rank()) {
-                edges_[i_local] = make_edge_2d(dist_, s);
-                ++i_local;
-              } else {
-                const int j = n_puts[rank].fetch_add(1);
-                send_data[j] = make_edge_2d_remote(dist_, s);
-              }
+            const int rank = dist_.owner_rank(e);
+            if (rank == dist_.all().rank()) {
+              edges_[i_local] = make_edge_2d(dist_, e);
+              ++i_local;
+            } else {
+              const int j = n_puts[rank].fetch_add(1);
+              send_data[j] = make_edge_2d_remote(dist_, e);
             }
           }
         }

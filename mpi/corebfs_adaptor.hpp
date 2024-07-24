@@ -60,9 +60,7 @@ static edge make_edge(const UnweightedPackedEdge &e) {
 
 static UnweightedPackedEdge make_unweighted_packed_edge(const global_vertex s,
                                                         const global_vertex t) {
-  UnweightedPackedEdge e;
-  e.set(s.t, t.t);
-  return e;
+  return UnweightedPackedEdge(s.t, t.t);
 }
 
 static UnweightedPackedEdge make_unweighted_packed_edge(const yoo &d,
@@ -110,39 +108,16 @@ static std::vector<edge_2d> distribute(const yoo &d, edge_storage *const stor) {
   return distr.drain();
 }
 
-static std::vector<UnweightedPackedEdge> convert_upper(
+static std::vector<UnweightedPackedEdge> convert_edges(
     const yoo &d, const edge_2d *const first, const edge_2d *const last) {
   const ptrdiff_t n = last - first;
   std::vector<UnweightedPackedEdge> ret(n);
-  std::vector<size_t> counts(omp_get_max_threads());
-  std::vector<size_t> offsets(omp_get_max_threads());
 
-#pragma omp parallel
-  {
-    const int tid = omp_get_thread_num();
-
-#pragma omp for
-    for (ptrdiff_t i = 0; i < n; ++i) {
-      const UnweightedPackedEdge e = make_unweighted_packed_edge(d, first[i]);
-      if (e.v0() < e.v1()) {
-        counts[tid] += 1;
-      }
-    }  // Implicit barrier at the end of "omp for"
-
-#pragma omp single
-    std::partial_sum(counts.begin(), counts.end() - 1, offsets.begin() + 1);
-
-#pragma omp for
-    for (ptrdiff_t i = 0; i < n; ++i) {
-      const UnweightedPackedEdge e = make_unweighted_packed_edge(d, first[i]);
-      if (e.v0() < e.v1()) {
-        ret[offsets[tid]] = e;
-        offsets[tid] += 1;
-      }
-    }
+#pragma omp parallel for
+  for (ptrdiff_t i = 0; i < n; ++i) {
+    ret[i] = make_unweighted_packed_edge(d, first[i]);
   }
-
-  ret.resize(offsets.back());
+  
   return ret;
 }
 
@@ -174,8 +149,7 @@ void shuffle_parallel(const RandomIterator first, const RandomIterator last) {
 
 //
 // Writes all the edges in `edges_2d` to `output`.
-// Note that `edges_2d` is assumed to be symmetric, and this function writes
-// only edges in the upper triangle, i.e., `(s, t)` s.t. `s < t`.
+// Note that `edges_2d` is assumed to be symmetric.
 //
 static void write(const yoo &d, const std::vector<edge_2d> &edges_2d,
                   edge_storage *const output) {
@@ -188,7 +162,7 @@ static void write(const yoo &d, const std::vector<edge_2d> &edges_2d,
     const size_t i = i_chunk * chunk_size;
     const size_t j = std::min((i_chunk + 1) * chunk_size, edges_2d.size());
     std::vector<UnweightedPackedEdge> chunk =
-        convert_upper(d, &edges_2d[i], &edges_2d[j]);
+        convert_edges(d, &edges_2d[i], &edges_2d[j]);
     output->write(chunk.data(), chunk.size());
     LOG_I << "Completed " << i_chunk + 1 << '/' << n_chunks;
   }
