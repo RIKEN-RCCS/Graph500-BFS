@@ -395,10 +395,28 @@ int make_symmetry_edge_list(EdgeList* edge_list, EdgeList* edge_list_sym) {
   int num_loops = edge_list->beginRead(true);
   edge_list_sym->beginWrite();
   uint64_t max_vertex = 0;
+  uint64_t total_local_count = 0, total_send_count = 0;
 
   for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
     EdgeType* edge_data;
     const int edge_data_length = edge_list->read(&edge_data);
+
+    int local_count = 0;
+#pragma omp parallel for
+    for (int i = 0; i < edge_data_length; ++i) {
+        const int64_t v0 = edge_data[i].v0();
+        const int64_t v1 = edge_data[i].v1();
+        if (v0 == v1) continue;
+        max_vertex |= (uint64_t)(v0 | v1);
+        if(edge_owner(v0, v1) == mpi.rank_2d) {
+          edges_to_send[__sync_fetch_and_add(&local_count, 1)] = EdgeType(v0, v1);
+        }
+        if(edge_owner(v1, v0) == mpi.rank_2d) {
+          edges_to_send[__sync_fetch_and_add(&local_count, 1)] = EdgeType(v1, v0);
+        }
+    } // #pragma omp parallel
+    edge_list_sym->write(edges_to_send, local_count);
+    total_local_count += local_count;
 
 #pragma omp parallel
     {
@@ -409,9 +427,12 @@ int make_symmetry_edge_list(EdgeList* edge_list, EdgeList* edge_list_sym) {
         const int64_t v0 = edge_data[i].v0();
         const int64_t v1 = edge_data[i].v1();
         if (v0 == v1) continue;
-        max_vertex |= (uint64_t)(v0 | v1);
-        (counts[edge_owner(v0, v1)])++;
-        (counts[edge_owner(v1, v0)])++;
+        if(edge_owner(v0, v1) != mpi.rank_2d) {
+          (counts[edge_owner(v0, v1)])++;
+        }
+        if(edge_owner(v1, v0) != mpi.rank_2d) {
+          (counts[edge_owner(v1, v0)])++;
+        }
       }  // #pragma omp for schedule(static)
 
 #pragma omp master
@@ -424,10 +445,16 @@ int make_symmetry_edge_list(EdgeList* edge_list, EdgeList* edge_list_sym) {
         const int64_t v0 = edge_data[i].v0();
         const int64_t v1 = edge_data[i].v1();
         if (v0 == v1) continue;
-        edges_to_send[(offsets[edge_owner(v0, v1)])++] = EdgeType(v0, v1);
-        edges_to_send[(offsets[edge_owner(v1, v0)])++] = EdgeType(v1, v0);
+        if(edge_owner(v0, v1) != mpi.rank_2d) {
+          edges_to_send[(offsets[edge_owner(v0, v1)])++] = EdgeType(v0, v1);
+        }
+        if(edge_owner(v1, v0) != mpi.rank_2d) {
+          edges_to_send[(offsets[edge_owner(v1, v0)])++] = EdgeType(v1, v0);
+        }
       }  // #pragma omp for schedule(static)
     }  // #pragma omp parallel
+
+    total_send_count += scatter.get_send_count();
 
     EdgeType* recv_edges = scatter.scatter(edges_to_send);
     const int64_t num_recv_edges = scatter.get_recv_count();
@@ -449,6 +476,14 @@ int make_symmetry_edge_list(EdgeList* edge_list, EdgeList* edge_list_sym) {
   edge_list_sym->endWrite();
   edge_list->endRead();
   MPI_Free_mem(edges_to_send);
+
+  uint64_t send_count[2] = {total_local_count, total_send_count};
+  uint64_t recv_count[2];
+  MPI_Reduce(send_count, recv_count, 2, MpiTypeOf<uint64_t>::type, MPI_SUM, 0, mpi.comm_2d);
+  if (mpi.isMaster()) {
+    print_with_prefix("local_count: %ld", recv_count[0]);
+    print_with_prefix("send_count: %ld", recv_count[1]);
+  }
 
   uint64_t tmp_send = max_vertex;
   MPI_Allreduce(&tmp_send, &max_vertex, 1, MpiTypeOf<uint64_t>::type, MPI_BOR,
