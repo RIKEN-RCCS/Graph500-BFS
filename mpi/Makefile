@@ -1,5 +1,5 @@
-#SW =GNU3
-SW=FUGAKU
+SW =GNU3
+# SW=FUGAKU
 VAMP = false
 SCOREP = false
 
