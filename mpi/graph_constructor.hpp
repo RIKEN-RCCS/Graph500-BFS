@@ -372,7 +372,11 @@ struct DegreeCalculation {
     BLOCK_SIZE = 1 << LOG_BLOCK_SIZE,
   };
 
+#ifdef __FUJITSU // On Fugaku
   const size_t DWIDE_ROW_DATA_FIXED_SIZE = 32 * (1ull << 30);  // 32GiB
+#else
+  const size_t DWIDE_ROW_DATA_FIXED_SIZE = sizeof(DWideRowEdge);
+#endif
 
   int org_local_bits_;
   int log_local_verts_unit_;
@@ -502,7 +506,12 @@ struct DegreeCalculation {
     // check out-of-bounds
     if (cur_offset[num_rows_] * sizeof(DWideRowEdge) >
         DWIDE_ROW_DATA_FIXED_SIZE) {
+#ifdef __FUJITSU
+      // Realloc is not expected on Fugaku
       print_with_prefix("dwide_row_data_: found out-of-bounds");
+#endif
+      dwide_row_data_ = static_cast<DWideRowEdge*>(std::realloc(
+          dwide_row_data_, cur_offset[num_rows_] * sizeof(DWideRowEdge)));
     }
 
     // store data
@@ -1515,6 +1524,40 @@ class GraphConstructor2DCSR {
     wide_row_starts_ = NULL;
     free(src_vertexes_);
     src_vertexes_ = NULL;
+
+#if VERVOSE_MODE
+    {
+      // print low degree vertices for Multi Level Bitmap
+      std::vector<int64_t> num_edge_count(10);
+#pragma omp parallel for
+      for (int64_t non_zero_idx = 0; non_zero_idx < non_zero_rows;
+           ++non_zero_idx) {
+        int64_t e_start = row_starts[non_zero_idx];
+        int64_t e_end = row_starts[non_zero_idx + 1];
+        int64_t num_edges = e_end - e_start;
+        if(num_edges < (int64_t)num_edge_count.size()) {
+          __sync_fetch_and_add(&num_edge_count[num_edges], 1);
+        }
+      }
+      if(num_edge_count[0] != 0) {
+        print_with_prefix("num_edge_count[0] != 0");
+      }
+      num_edge_count[0] = non_zero_rows;
+      std::vector<int64_t> sum_edge_count(10);
+      MPI_Reduce(num_edge_count.data(), sum_edge_count.data(),
+                 (int)num_edge_count.size(), MpiTypeOf<int64_t>::type, MPI_SUM,
+                 0, mpi.comm_2d);
+      if(mpi.isMaster()) {
+        for(int i = 0; i < (int)sum_edge_count.size(); ++i) {
+          if (i >= 1) {
+            sum_edge_count[i] = sum_edge_count[i - 1] - sum_edge_count[i];
+          }
+          print_with_prefix("#Vertices with more than %d neighbors: %ld", i,
+                            sum_edge_count[i]);
+        }
+      }
+    }
+#endif // #if VERVOSE_MODE
 
     g.row_starts_ = row_starts;
 #if COMPRESS_ROW_STARTS
