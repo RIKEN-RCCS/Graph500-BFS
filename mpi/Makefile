@@ -23,7 +23,7 @@ FUGAKU_POWER_CLINK=-lpwr
 endif
 
 # use small bit for reordering instead of whole vertex bit
-SMALL_REORDER_BIT = false
+SMALL_REORDER_BIT ?= false
 ifeq ($(SMALL_REORDER_BIT), true)
 SMALL_REORDER_BIT_OPT = -DSMALL_REORDER_BIT
 else
