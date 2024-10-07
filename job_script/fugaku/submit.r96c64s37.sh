@@ -1,18 +1,16 @@
 #!/bin/bash
-#PJM -L "node=8x48x16:strict"
+#PJM -L "node=8x24x32:strict"
 #PJM -L "rscgrp=large"
-#PJM -L "elapse=0:30:00"
+#PJM -L "elapse=1:00:00"
 #PJM -L "freq=2200,eco_state=2"
 #PJM --rsc-list "retention_state=0"
-#PJM --llio localtmp-size=2Gi
-#PJM --llio sharedtmp-size=2Gi
 #PJM --mpi "assign-online-node"
 #PJM -g ra000019
 #PJM -m b
 #PJM --mail-list masahiro.nakao@riken.jp
 #PJM -S
 
-export TOFU_6D=ybc
+export TOFU_6D=zbc
 export PLE_MPI_STD_EMPTYFILE=off
 export OMP_NUM_THREADS=48
 export FLIB_BARRIER=HARD

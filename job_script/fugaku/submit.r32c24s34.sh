@@ -1,11 +1,9 @@
 #!/bin/bash
 #PJM -L "node=8x6x16:strict"
 #PJM -L "rscgrp=large"
-#PJM -L "elapse=0:20:00"
+#PJM -L "elapse=1:00:00"
 #PJM -L "freq=2200,eco_state=2"
 #PJM --rsc-list "retention_state=0"
-#PJM --llio localtmp-size=2Gi
-#PJM --llio sharedtmp-size=2Gi
 #PJM --mpi "assign-online-node"
 #PJM -g ra000019
 #PJM -m b

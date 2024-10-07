@@ -1,115 +1,67 @@
- Please cite the following paper if you use our code. 
- 
-  Koji Ueno, Toyotaro Suzumura, Naoya Maruyama, Katsuki Fujisawa, Satoshi Matsuoka:
-Efficient Breadth-First Search on Massively Parallel and Distributed-Memory Machines. Data Science and Engineering 2(1): 22-35 (2017)
+# Graph500-BFS
 
-  Koji Ueno, Toyotaro Suzumura, Naoya Maruyama, Katsuki Fujisawa, Satoshi Matsuoka (2016-12-01). "Extreme scale breadth-first search on supercomputers". 2016 IEEE International Conference on Big Data (Big Data): 1040–1047. doi:10.1109/BigData.2016.7840705.
+This is a Graph500 benchmark program developed for the K computer and its successor, the supercomputer Fugaku, in Japan.
+Please cite the following paper if you use our code:
 
-The license of the code is Apache License, Version 2.0. 
+- Junya Arai, Masahiro Nakao, Yuto Inoue, Kanto Teranishi, Koji Ueno, Keiichiro Yamamura, Mitsuhisa Sato, and Katsuki Fujisawa, "Doubling Graph Traversal Efficiency to 198 TeraTEPS on the Supercomputer Fugaku," in SC24: International Conference for High Performance Computing, Networking, Storage and Analysis, 2024.
 
-Here is how you build and run our code. All the detailed technical information is described in the above our paper. 
+Our previous publications are listed below (from most recent to oldest):
 
-## Build
+- Masahiro Nakao, Koji Ueno, Katsuki Fujisawa, Yuetsu Kodama, and Mitsuhisa, Sato, "Performance of the Supercomputer Fugaku for Breadth-First Search in Graph500 Benchmark," in High Performance Computing:
+36th International Conference, ISC High Performance 2021, 2021, pp. 372-390.
+- Koji Ueno, Toyotaro Suzumura, Naoya Maruyama, Katsuki Fujisawa, Satoshi Matsuoka, "Efficient Breadth-First Search on Massively Parallel and Distributed-Memory Machines," Data Science and Engineering, vol. 2, no. 1, pp. 22-35, 2017.
+- Koji Ueno, Toyotaro Suzumura, Naoya Maruyama, Katsuki Fujisawa, Satoshi Matsuoka. "Extreme Scale Breadth-First Search on Supercomputers". in 2016 IEEE International Conference on Big Data (Big Data), 2016, pp. 1040-1047.
 
-### Prerequisites
+The code is licensed under the Apache License, Version 2.0.
 
-Libraries/Frameworks shown below are needed to be installed.
+## How to Use
 
-* libnuma
-* C/C++ compiler supports OpenMP (e.g. gcc/g++)
-* GNU make
-* MPI library & runtime
-    * OpenMPI
-    * MPICH
-    * MVAPICH
+While this program performs best on the supercomputer Fugaku, you can test it on an x86_64 Linux server.
+For technical details, please refer to our papers listed above.
 
-### Build instruction
+### Tested Environment
 
-1. Change directory to root of this repository.
-2. Run this commands.
+- CPU: AMD EPYC 7713 (64 cores) x 2
+- Memory: 1 TiB
+- Storage: 2 TB SATA SSD x 2
+- OS: Ubuntu 22.04.4
+- MPI: OpenMPI 4.1.2
+- Compiler: GCC 11.4.0
+- Libraries: libnuma 2.0.14
 
-```sh
-cd mpi
-make cpu
+### Build
+
+Use the following command to build the executable with `mpicxx`:
+```console
+$ (cd mpi && make)
 ```
 
-3. Now you can run benchmarking with command like this.
-
-```sh
-# OpenMPI >= 1.8
-mpirun -np 1 -bind-to none -output-filename ./log/lP1T8S16VR0BNONE -x OMP_NUM_THREADS=8 ./runnable 16
-# OpenMPI <= 1.6.5
-mpirun -np 1 -bind-to-none -output-filename ./log/lP1T8S16VR0BNONE -x OMP_NUM_THREADS=8 ./runnable 16
-# MPICH / MVAPICH
-mpirun -n 1 -outfile-pattern ./log/lP1T8S16VR0BNONE -genv OMP_NUM_THREADS 8 ./mpi/runnable 16
+Note that the group reordering technique is disabled by default.
+To enable it, build the executable using the following command:
+```console
+$ (cd mpi && make SMALL_REORDER_BIT=true)
 ```
 
+### Execution
 
-## Available options
-
-### `Specifying number of threads and number of scales`
-```sh
-# OpenMPI >= 1.8
-mpirun -np 1 -bind-to none -output-filename ./log/lP1T8S16VR0BNONE -x OMP_NUM_THREADS=<nthreads> ./runnable <nscale>
-# OpenMPI <= 1.6.5
-mpirun -np 1 -bind-to-none -output-filename ./log/lP1T8S16VR0BNONE -x OMP_NUM_THREADS=<nthreads> ./runnable <nscale>
-# MPICH / MVAPICH
-mpirun -n 1 -outfile-pattern ./log/lP1T8S16VR0BNONE -genv OMP_NUM_THREADS <nthreads> ./mpi/runnable <nscale>
+For single-node execution, use the following command:
+```console
+$ mpiexec -n 1 --bind-to none mpi/runnable <scale> <options>
 ```
 
-* `nthreads` : number of threads
-* `nscale` : number of scale
+Each placeholder is described below:
 
-### make options
-```sh
-make [VERBOSE=<bool>] [VERTEX_REORDERING=<0|1|2>] cpu
+- `<scale>`: A SCALE value.
+  It is recommended to start with SCALE 20 and increase it gradually, as both memory requirement and execution time grow exponentially with a SCALE value.
+- `<options>`: A combination of the following options:
+    - `-A`: Enable adaptive parameter tuning.
+    - `-C`: Enable forest pruning.
+    - `-n <N>`: Set the number of search keys to `<N>`. By default, 16 search keys are sampled and processed.
+
+Note that specifying `-n 64` is necessary to comply with the Graph500 specification, and all the results in the paper were obtained using this setting.
+For example, to measure performance for SCALE 20 with all the proposed techniques enabled, use the following command:
+```console
+$ mpiexec -n 1 --bind-to none mpi/runnable 20 -A -C -n 64
 ```
 
-* `VERBOSE` : toggle verbose output. true = enable, false = disenable.
-* `VERTEX_REORDERING` : specify vertex reordering mode. 0 = do nothing (default), 1 = only reduce isolated vertices, 2 = sort by degree and reduce isolated vertices.
-
-
-## Benchmarking support script
-
-In this repository, we provides support script written in python. This script includes these features:
-
-* spawn rebuilding if nesessary
-* generate logging file name automatically
-* generate and spawn mpirun command (supports OpenMPI(>= 1.8, <= 1.6.5)/MPICH/MVAPICH)
-* increasing-scale mode (iterate benchmarking with increasing scale unless `runnable` returns non-zero exit status)
-
-For usage, please run this command:
-
-```sh
-# change directory to root of this repository and ...
-./run-benchmark.py -h
-# or ...
-python run-benchmark.py -h
-```
-
-### Examples
-
-```sh
-# scale 20, thread x 8, real benchmarking, MPI runtime : OpenMPI (>= 1.8)
-./run-benchmark.py -s 20 -t 8 --logfile-dest ./log201606XX -m OpenMPI
-# Notes : rebuilding `runnable` binary is executed in this script, so manual rebuilding is not needed.
-
-# scale 20, thread x 8, test mode (BFS x 16), vertex reordering mode : 1, MPI runtime : MPICH
-./run-benchmark.py -s 20 -t 8 --logfile-dest ./log201606XXtest --test --vertex-reordering 0 -m MPICH
-```
-
-### Tips
-
-* If you need to rebuild forcibly, remove file `prev_build_options`.
-
-
-
-
-## Appendix : Tested environment
-
-* OS : Ubuntu 14.04 LTS (64bit)
-* Linux kernel version : 3.13.0-88-generic
-* libnuma, mpich are installed via apt
-* CPU : Intel Core i7-2640
-* gcc version : 4.8.4 (Ubuntu 4.8.4-2ubuntu1~14.04.3)
-* tested MPI runtime : MPICH 3.0.4
+The measured performance in TEPS will be displayed in the line beginning with `harmonic_mean_TEPS`.

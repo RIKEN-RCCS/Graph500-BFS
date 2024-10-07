@@ -4,6 +4,7 @@
 #PJM -L "elapse=0:15:00"
 #PJM -L "freq=2200,eco_state=2"
 #PJM --rsc-list "retention_state=0"
+#PJM --llio localtmp-size=80Gi
 #PJM --mpi "assign-online-node"
 #PJM -g ra000019
 #PJM -m b
