@@ -358,12 +358,25 @@ static void deduplicate(std::vector<edge_2d> *const sorted_edges) {
   sorted_edges->resize(last - sorted_edges->begin());
 }
 
+static std::vector<size_t> exclusive_scan(const std::vector<size_t> &xs,
+                                          const size_t init) {
+  auto ys = make_with_capacity<std::vector<size_t>>(xs.size());
+  ys.push_back(init);
+  std::copy(xs.begin(), xs.end() - 1, std::back_inserter(ys));
+  std::partial_sum(ys.begin(), ys.end(), ys.begin());
+  assert(xs.size() == ys.size());
+  return ys;
+}
+
 class distributor : types::noncopyable {
   const yoo &dist_;
   std::vector<edge_2d> edges_;
+  size_t m_sent_;  // #edges sent to other ranks
+  size_t m_local_; // #edges not sent to other ranks
 
 public:
-  distributor(const yoo &d, const size_t edge_capacity) : dist_(d), edges_() {
+  distributor(const yoo &d, const size_t edge_capacity)
+      : dist_(d), edges_(), m_sent_(), m_local_() {
     edges_.reserve(edge_capacity);
   }
 
@@ -371,7 +384,6 @@ public:
   // 1. Transfers edges to the owner of each of them and appends the reveiced
   //    edges to `edge_2ds`.
   // 2. Removes self-loops.
-  // 3. Symmetrize edges.
   //
   // `convert` is used to convert the value type of `RandomAccessIterator` to
   // `graph::edge`.
@@ -389,37 +401,83 @@ public:
         typename std::iterator_traits<RandomAccessIterator>::difference_type;
     const difference_type n = last - first;
 
+    //
+    // 1. Count the number of edges
+    //
+
+    // thread ID -> #local edges (edges owned by this rank)
+    std::vector<size_t> local_counts(omp_get_max_threads());
+    // rank -> #remote edges
     std::vector<std::atomic<int>> send_counts(dist_.all().size());
     {
-      INDEXED_BFS_TIMED_SCOPE("send_counts");
-#pragma omp parallel for schedule(static)
-      for (difference_type i = 0; i < n; ++i) {
-        const edge &e = convert(first[i]);
-        // Remove self-loops
-        if (e.source() != e.target()) {
-          send_counts[dist_.owner_rank(e)].fetch_add(1);
-          send_counts[dist_.owner_rank(e.reverse())].fetch_add(1);
+      INDEXED_BFS_TIMED_SCOPE("edge_count");
+
+#pragma omp parallel
+      {
+        const int tid = omp_get_thread_num();
+#pragma omp for schedule(static)
+        for (difference_type i = 0; i < n; ++i) {
+          const edge &e = convert(first[i]);
+          if (e.source() != e.target()) {            // Remove self-loops
+            const int rank = dist_.owner_rank(e);
+            if (rank == dist_.all().rank()) {
+              local_counts[tid] += 1;
+            } else {
+              send_counts[rank].fetch_add(1);
+            }
+          }
         }
       }
     }
+    // Update profiling data
+    m_local_ += std::accumulate(local_counts.begin(), local_counts.end(), 0);
+    m_sent_ += std::accumulate(send_counts.begin(), send_counts.end(), 0);
 
+    //
+    // 2. Write edges to arrays
+    //
+
+    // thread ID -> index where the first local edge should be placed
+    const std::vector<size_t> local_displs =
+        exclusive_scan(local_counts, edges_.size());
+    // Resize `edges_` to make space for local edges
+    const size_t local_capacity = local_displs.back() + local_counts.back();
+    if (edges_.capacity() < local_capacity) {
+      LOG_W << "Reallocation: {capacity: " << edges_.capacity()
+            << ", required: " << local_capacity << "}";
+    }
+    edges_.resize(local_capacity);
+
+    // rank -> index where the first local edge should be placed
     const std::vector<int> send_displs = net::make_displacements(send_counts);
-
     std::vector<edge_2d> send_data(send_displs.back() + send_counts.back() + 1);
     std::vector<std::atomic<int>> n_puts = copy_atomic_vector(send_displs);
     {
       INDEXED_BFS_TIMED_SCOPE("send_data");
-#pragma omp parallel for schedule(static)
-      for (difference_type i = 0; i < n; ++i) {
-        const edge &e = convert(first[i]);
-        if (e.source() != e.target()) {
-          const int j = n_puts[dist_.owner_rank(e)].fetch_add(1);
-          send_data[j] = make_edge_2d_remote(dist_, e);
-          const int k = n_puts[dist_.owner_rank(e.reverse())].fetch_add(1);
-          send_data[k] = make_edge_2d_remote(dist_, e.reverse());
+
+#pragma omp parallel
+      {
+        size_t i_local = local_displs[omp_get_thread_num()];
+#pragma omp for schedule(static)
+        for (difference_type i = 0; i < n; ++i) {
+          const edge &e = convert(first[i]);
+          if (e.source() != e.target()) {
+            const int rank = dist_.owner_rank(e);
+            if (rank == dist_.all().rank()) {
+              edges_[i_local] = make_edge_2d(dist_, e);
+              ++i_local;
+            } else {
+              const int j = n_puts[rank].fetch_add(1);
+              send_data[j] = make_edge_2d_remote(dist_, e);
+            }
+          }
         }
       }
     }
+
+    //
+    // 3. Send and receive remote edges
+    //
 
     const std::vector<std::atomic<int>> recv_counts =
         net::alltoall(send_counts, dist_.all());
@@ -427,12 +485,12 @@ public:
 
     const size_t orig_len = edges_.size();
     const size_t recv_total = recv_displs.back() + recv_counts.back();
-    const size_t req_len = edges_.size() + recv_total;
-    if (edges_.capacity() < req_len) {
+    const size_t recv_capacity = edges_.size() + recv_total;
+    if (edges_.capacity() < recv_capacity) {
       LOG_W << "Reallocation: {capacity: " << edges_.capacity()
-            << ", required: " << req_len << "}";
+            << ", required: " << recv_capacity << "}";
     }
-    edges_.resize(req_len);
+    edges_.resize(recv_capacity);
 
     {
       INDEXED_BFS_TIMED_SCOPE("alltoallv");
@@ -451,6 +509,12 @@ public:
 
   std::vector<edge_2d> drain() {
     INDEXED_BFS_TIMED_SCOPE(nullptr);
+
+    const size_t m_local_global =
+        net::reduce(m_local_, MPI_SUM, 0, dist_.all());
+    const size_t m_sent_global = net::reduce(m_sent_, MPI_SUM, 0, dist_.all());
+    LOG_I << "local_edge_count: " << m_local_global;
+    LOG_I << "sent_edge_count: " << m_sent_global;
 
     //
     // `util::sort::sort_parallel()` requires additional memory at

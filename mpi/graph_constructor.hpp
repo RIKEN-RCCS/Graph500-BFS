@@ -46,6 +46,22 @@ class SubRowMap {
   BitmapType* row_bitmap_;  // Index: SBI
   TwodVertex* row_sums_;    // Index: SBI
   uint32_t* row_starts_;    // Index: CSI
+
+  std::pair<uint32_t, uint32_t> GetEdgeRange(const int64_t bit_idx) {
+    const auto word_idx = bit_idx >> PRM::LOG_NBPE;
+    const auto cq_bit = BitmapType(1) << (bit_idx & PRM::NBPE_MASK);
+
+    const auto bitmap_i = row_bitmap_[word_idx];
+    if ((bitmap_i & cq_bit) == BitmapType(0)) {
+      return std::make_pair(0, 0);
+    }
+
+    const auto non_zero_offset =
+        row_sums_[word_idx] + __builtin_popcountl(bitmap_i & (cq_bit - 1));
+
+    return std::make_pair(row_starts_[non_zero_offset],
+                          row_starts_[non_zero_offset + 1]);
+  }
 };
 
 #ifdef SMALL_REORDER_BIT
@@ -372,7 +388,7 @@ struct DegreeCalculation {
     BLOCK_SIZE = 1 << LOG_BLOCK_SIZE,
   };
 
-#ifdef __FUJITSU // On Fugaku
+#ifdef __FUJITSU                                               // On Fugaku
   const size_t DWIDE_ROW_DATA_FIXED_SIZE = 32 * (1ull << 30);  // 32GiB
 #else
   const size_t DWIDE_ROW_DATA_FIXED_SIZE = sizeof(DWideRowEdge);
@@ -451,6 +467,10 @@ struct DegreeCalculation {
     if (orig_vertexes_ != NULL) {
       free(orig_vertexes_);
       orig_vertexes_ = NULL;
+    }
+    if (num_vertexes_ != NULL) {
+      free(num_vertexes_);
+      num_vertexes_ = NULL;
     }
     if (row_length_ != NULL) {
       free(row_length_);
@@ -743,7 +763,6 @@ struct DegreeCalculation {
   void make_construct_data(LocalVertex* reorder_map) {
     int64_t src_bitmap_size = local_bitmap_size() * mpi.size_2dc;
     int64_t num_wide_rows = local_wide_row_size() * mpi.size_2dc;
-
     // allocate 1
     row_bitmap_ = static_cast<BitmapType*>(
         cache_aligned_xcalloc(src_bitmap_size * sizeof(BitmapType)));
@@ -968,7 +987,8 @@ class GraphConstructor2DCSR {
         degree_calc_(NULL),
         src_vertexes_(NULL),
         wide_row_starts_(NULL),
-        row_starts_sup_(NULL) {}
+        row_starts_sup_(NULL) {
+  }
   ~GraphConstructor2DCSR() {
     // since the heap checker of FUJITSU compiler reports error on free(NULL)
     // ...
@@ -986,16 +1006,17 @@ class GraphConstructor2DCSR {
     }
   }
 
-  void construct(EdgeList* edge_list, int log_local_verts_unit, GraphType& g) {
+  void construct(const int scale, EdgeList* sym_edge_list,
+                 int log_local_verts_unit, GraphType& g) {
     TRACER(construction);
     log_local_verts_unit_ =
         std::max<int>(log_local_verts_unit, LOG_EDGE_PART_SIZE);
     g.log_orig_global_verts_ = 0;
 
-    searchMaxVertex(edge_list, g);
-    scatterAndScanEdges(edge_list, g);
+    initializeParameters(scale, g);
+    scatterAndScanEdges(sym_edge_list, g);
     makeWideRowStarts(g);
-    scatterAndStore(edge_list, g);
+    scatterAndStore(sym_edge_list, g);
     sortEdges(g);
     if (row_starts_sup_ != NULL) {
       free(row_starts_sup_);
@@ -1061,8 +1082,7 @@ class GraphConstructor2DCSR {
 
  private:
   // step1: for computing degree order
-  void initializeParameters(int log_max_vertex, int64_t num_global_edges,
-                            GraphType& g) {
+  void initializeParameters(int log_max_vertex, GraphType& g) {
     int64_t num_global_verts = int64_t(1) << log_max_vertex;
     int64_t local_verts_unit = int64_t(1) << log_local_verts_unit_;
     int64_t num_local_verts =
@@ -1095,6 +1115,12 @@ class GraphConstructor2DCSR {
     local_bits_ = g.local_bits_ = get_msb_index(g.num_local_verts_ - 1) + 1;
     g.r_bits_ = (mpi.size_2dr == 1) ? 0 : (get_msb_index(mpi.size_2dr - 1) + 1);
     num_wide_rows_ = g.num_local_verts_ * mpi.size_2dc / EDGE_PART_SIZE;
+    if (mpi.isMaster()) {
+      print_with_prefix("EDGE_PART_SIZE: %d", EDGE_PART_SIZE);
+      print_with_prefix("mpi.size_2dc: %d", mpi.size_2dc);
+      print_with_prefix("g.num_local_verts_: %d", g.num_local_verts_);
+      print_with_prefix("num_wide_rows: %d", num_wide_rows_);
+    }
     wide_row_starts_ = data.wide_row_starts_;
     row_starts_sup_ = data.row_starts_sup_;
     g.row_bitmap_ = data.row_bitmap_;
@@ -1133,94 +1159,12 @@ class GraphConstructor2DCSR {
       max_vertex |= (uint64_t)(v0 | v1);
     }  // #pragma omp for schedule(static)
   }
-
-  // using SFINAE
-  // function #1
-  template <typename EdgeType>
-  void scanEdges(const EdgeType* edge_data, const int edge_data_length,
-                 int* restrict counts,
-                 typename EdgeType::has_weight dummy = 0) {
-#pragma omp for schedule(static)
-    for (int i = 0; i < edge_data_length; ++i) {
-      const int64_t v0 = edge_data[i].v0();
-      const int64_t v1 = edge_data[i].v1();
-      const int weight = edge_data[i].weight_;
-      if (v0 == v1) continue;
-      (counts[edge_owner(v0, v1)])++;
-      (counts[edge_owner(v1, v0)])++;
-    }  // #pragma omp for schedule(static)
-  }
-
-  // function #2
-  template <typename EdgeType>
-  void scanEdges(const EdgeType* edge_data, const int edge_data_length,
-                 int* restrict counts, typename EdgeType::no_weight dummy = 0) {
-#pragma omp for schedule(static)
-    for (int i = 0; i < edge_data_length; ++i) {
-      const int64_t v0 = edge_data[i].v0();
-      const int64_t v1 = edge_data[i].v1();
-      if (v0 == v1) continue;
-      (counts[edge_owner(v0, v1)])++;
-      (counts[edge_owner(v1, v0)])++;
-    }  // #pragma omp for schedule(static)
-  }
-
-  // using SFINAE
-  // function #1
-  template <typename EdgeType>
-  void reduceMaxWeight(int max_weight, GraphType& g,
-                       typename EdgeType::has_weight dummy = 0) {
-    int global_max_weight;
-    MPI_Allreduce(&max_weight, &global_max_weight, 1, MPI_INT, MPI_MAX,
-                  mpi.comm_2d);
-    g.max_weight_ = global_max_weight;
-    g.log_max_weight_ = get_msb_index(global_max_weight);
-  }
-
-  // function #2
-  template <typename EdgeType>
-  void reduceMaxWeight(int max_weight, GraphType& g,
-                       typename EdgeType::no_weight dummy = 0) {}
-
-  void searchMaxVertex(EdgeList* edge_list, GraphType& g) {
-    TRACER(scan_vertex);
-    uint64_t max_vertex = 0;
-    int max_weight = 0;
-
-    if (mpi.isMaster()) print_with_prefix("Searching max vertex id...");
-
-    int num_loops = edge_list->beginRead(false);
-    for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
-      EdgeType* edge_data;
-      const int edge_data_length = edge_list->read(&edge_data);
-#pragma omp parallel reduction(| : max_vertex) reduction(+ : max_weight)
-      {
-        maxVertex(edge_data, edge_data_length, max_vertex, max_weight);
-      }  // #pragma omp parallel
-    }
-    edge_list->endRead();
-
-    {
-      uint64_t tmp_send = max_vertex;
-      MPI_Allreduce(&tmp_send, &max_vertex, 1, MpiTypeOf<uint64_t>::type,
-                    MPI_BOR, mpi.comm_2d);
-
-      const int log_max_vertex = get_msb_index(max_vertex) + 1;
-      if (mpi.isMaster())
-        print_with_prefix("Estimated SCALE = %d.", log_max_vertex);
-
-      initializeParameters(log_max_vertex,
-                           edge_list->num_local_edges() * mpi.size_2d, g);
-      reduceMaxWeight<EdgeType>(max_weight, g);
-    }
-  }
-
-  void scatterAndScanEdges(EdgeList* edge_list, GraphType& g) {
+  void scatterAndScanEdges(EdgeList* sym_edge_list, GraphType& g) {
     TRACER(scan_edge);
-    ScatterContext scatter(mpi.comm_2d);
+    ScatterContext scatter(mpi.comm_2dr);
     int64_t* edges_to_send = static_cast<int64_t*>(
-        xMPI_Alloc_mem(2 * EdgeList::CHUNK_SIZE * sizeof(int64_t)));
-    int num_loops = edge_list->beginRead(false);
+        xMPI_Alloc_mem(EdgeList::CHUNK_SIZE * sizeof(int64_t)));
+    int num_loops = sym_edge_list->beginRead(false);
     degree_calc_->init(num_loops);
 
     if (mpi.isMaster())
@@ -1229,7 +1173,7 @@ class GraphConstructor2DCSR {
 
     for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
       EdgeType* edge_data;
-      const int edge_data_length = edge_list->read(&edge_data);
+      const int edge_data_length = sym_edge_list->read(&edge_data);
 
 #pragma omp parallel
       {
@@ -1238,22 +1182,11 @@ class GraphConstructor2DCSR {
 #pragma omp for schedule(static)
         for (int i = 0; i < edge_data_length; ++i) {
           const int64_t v0 = edge_data[i].v0();
-          const int64_t v1 = edge_data[i].v1();
-          if (v0 == v1) continue;
-          (counts[vertex_owner(v0)])++;
-          (counts[vertex_owner(v1)])++;
+          (counts[vertex_owner_c(v0)])++;
         }  // #pragma omp for schedule(static)
       }  // #pragma omp parallel
 
       scatter.sum();
-
-#if NETWORK_PROBLEM_AYALISYS
-      if (mpi.isMaster()) print_with_prefix("MPI_Allreduce...");
-#endif
-
-#if NETWORK_PROBLEM_AYALISYS
-      if (mpi.isMaster()) print_with_prefix("OK! ");
-#endif
 
       const int local_bits = org_local_bits_;
 #pragma omp parallel
@@ -1264,28 +1197,13 @@ class GraphConstructor2DCSR {
         for (int i = 0; i < edge_data_length; ++i) {
           const int64_t v0 = edge_data[i].v0();
           const int64_t v1 = edge_data[i].v1();
-          if (v0 == v1) continue;
           // high: v1's c, low: v0's vertex_local, lgl: local_bits
           const SeparatedId v0_swizzled(vertex_owner_c(v1), vertex_local(v0),
                                         local_bits);
-          const SeparatedId v1_swizzled(vertex_owner_c(v0), vertex_local(v1),
-                                        local_bits);
-          // assert (offsets[edge_owner(v0,v1)] < 2 * FILE_CHUNKSIZE);
-          edges_to_send[(offsets[vertex_owner(v0)])++] = v0_swizzled.value;
-          // assert (offsets[edge_owner(v1,v0)] < 2 * FILE_CHUNKSIZE);
-          edges_to_send[(offsets[vertex_owner(v1)])++] = v1_swizzled.value;
+          edges_to_send[(offsets[vertex_owner_c(v0)])++] = v0_swizzled.value;
         }  // #pragma omp for schedule(static)
       }  // #pragma omp parallel
-
-#if NETWORK_PROBLEM_AYALISYS
-      if (mpi.isMaster()) print_with_prefix("MPI_Alltoall...");
-#endif
-
       int64_t* recv_edges = scatter.scatter(edges_to_send);
-
-#if NETWORK_PROBLEM_AYALISYS
-      if (mpi.isMaster()) print_with_prefix("OK! ");
-#endif
 
       const int64_t num_recv_edges = scatter.get_recv_count();
       degree_calc_->add(loop_count, recv_edges, num_recv_edges);
@@ -1293,10 +1211,11 @@ class GraphConstructor2DCSR {
       scatter.free(recv_edges);
 
       if (mpi.isMaster())
-        print_with_prefix("Iteration %d finished.", loop_count);
+        print_with_prefix("[scatterAndScanEdges] Completed %d/%d",
+                          loop_count + 1, num_loops);
       INDEXED_BFS_LOG_RSS();
     }
-    edge_list->endRead();
+    sym_edge_list->endRead();
     MPI_Free_mem(edges_to_send);
 
     if (mpi.isMaster()) print_with_prefix("Finished scattering edges.");
@@ -1376,17 +1295,19 @@ class GraphConstructor2DCSR {
 
 #if COMPRESS_ROW_STARTS
     // construct sub-row_sums
-    g.sub_row_map_.row_sums_ = static_cast<TwodVertex*>(
-        cache_aligned_xmalloc((row_bitmap_length + 1) * sizeof(TwodVertex)));
+    const int64_t sub_row_bitmap_length =
+        (non_zero_rows + NBPE_MASK) >> LOG_NBPE;
+    g.sub_row_map_.row_sums_ = static_cast<TwodVertex*>(cache_aligned_xmalloc(
+        (sub_row_bitmap_length + 1) * sizeof(TwodVertex)));
     g.sub_row_map_.row_sums_[0] = 0;
-    for (int64_t i = 0; i < row_bitmap_length; ++i) {
+    for (int64_t i = 0; i < sub_row_bitmap_length; ++i) {
       int num_rows = __builtin_popcountl(g.sub_row_map_.row_bitmap_[i]);
       g.sub_row_map_.row_sums_[i + 1] = g.sub_row_map_.row_sums_[i] + num_rows;
     }
 
     // construct sub-row_starts
     const int64_t non_zero_sub_rows =
-        g.sub_row_map_.row_sums_[row_bitmap_length];
+        g.sub_row_map_.row_sums_[sub_row_bitmap_length];
     g.sub_row_map_.row_starts_ = static_cast<uint32_t*>(
         cache_aligned_xmalloc((non_zero_sub_rows + 1) * sizeof(uint32_t)));
 
@@ -1426,6 +1347,43 @@ class GraphConstructor2DCSR {
     if (mpi.isMaster()) print_with_prefix("Finished compacting edge array.");
   }
 
+  // Counts and prints the number of low-degree vertices, particularly for
+  // calculating the memory size saved by multilevel bitmap compression.
+  void printLowDegreeVertexCounts(const int64_t non_zero_rows,
+                                  const int64_t* const row_starts) {
+    std::vector<int64_t> num_edge_count(10);
+#pragma omp parallel for
+    for (int64_t non_zero_idx = 0; non_zero_idx < non_zero_rows;
+         ++non_zero_idx) {
+      int64_t e_start = row_starts[non_zero_idx];
+      int64_t e_end = row_starts[non_zero_idx + 1];
+      int64_t num_edges = e_end - e_start;
+      if (num_edges < (int64_t)num_edge_count.size()) {
+        __sync_fetch_and_add(&num_edge_count[num_edges], 1);
+      }
+    }
+    if (num_edge_count[0] != 0) {
+      // `num_edge_count` should be zero because `row_starts` should not have
+      // any values corresponding to vertices without incident edges.
+      print_with_prefix("WARNING: num_edge_count[0] != 0");
+    }
+    // Exploit `num_edge_count[0]` to sum up the number of vertices
+    num_edge_count[0] = non_zero_rows;
+    std::vector<int64_t> sum_edge_count(10);
+    MPI_Reduce(num_edge_count.data(), sum_edge_count.data(),
+               (int)num_edge_count.size(), MpiTypeOf<int64_t>::type, MPI_SUM, 0,
+               mpi.comm_2d);
+    if (mpi.isMaster()) {
+      for (int i = 0; i < (int)sum_edge_count.size(); ++i) {
+        if (i >= 1) {
+          sum_edge_count[i] = sum_edge_count[i - 1] - sum_edge_count[i];
+        }
+        print_with_prefix("#Vertices with more than %d neighbors: %ld", i,
+                          sum_edge_count[i]);
+      }
+    }
+  }
+
   void constructFromWideCSR(GraphType& g) {
     TRACER(form_csr);
     const int64_t num_local_verts = g.num_local_verts_;
@@ -1448,8 +1406,14 @@ class GraphConstructor2DCSR {
         cache_aligned_xmalloc((non_zero_rows + 1) * sizeof(int64_t)));
 
 #if COMPRESS_ROW_STARTS
+    const int64_t sub_row_bitmap_length =
+        (non_zero_rows + NBPE_MASK) >> LOG_NBPE;
     BitmapType* sub_row_bitmap = static_cast<BitmapType*>(
-        cache_aligned_xcalloc(row_bitmap_length * sizeof(BitmapType)));
+        cache_aligned_xcalloc(sub_row_bitmap_length * sizeof(BitmapType)));
+    VERVOSE(if (mpi.isMaster()) {
+      print_with_prefix("sub_row_bitmap_length %f M",
+                        to_mega(sub_row_bitmap_length));
+    });
 #endif  // #if COMPRESS_ROW_STARTS
 
     if (mpi.isMaster()) print_with_prefix("Computing row_starts.");
@@ -1479,8 +1443,8 @@ class GraphConstructor2DCSR {
 
 #if COMPRESS_ROW_STARTS
           if (row_length[i] > 1) {
-            BitmapType& bitmap_v = sub_row_bitmap[word_idx];
-            BitmapType add_mask = BitmapType(1) << bit_idx;
+            BitmapType& bitmap_v = sub_row_bitmap[row_offset >> LOG_NBPE];
+            BitmapType add_mask = BitmapType(1) << (row_offset & NBPE_MASK);
             if ((bitmap_v & add_mask) == 0) {
               __sync_fetch_and_or(&bitmap_v, add_mask);
             }
@@ -1526,38 +1490,8 @@ class GraphConstructor2DCSR {
     src_vertexes_ = NULL;
 
 #if VERVOSE_MODE
-    {
-      // print low degree vertices for Multi Level Bitmap
-      std::vector<int64_t> num_edge_count(10);
-#pragma omp parallel for
-      for (int64_t non_zero_idx = 0; non_zero_idx < non_zero_rows;
-           ++non_zero_idx) {
-        int64_t e_start = row_starts[non_zero_idx];
-        int64_t e_end = row_starts[non_zero_idx + 1];
-        int64_t num_edges = e_end - e_start;
-        if(num_edges < (int64_t)num_edge_count.size()) {
-          __sync_fetch_and_add(&num_edge_count[num_edges], 1);
-        }
-      }
-      if(num_edge_count[0] != 0) {
-        print_with_prefix("num_edge_count[0] != 0");
-      }
-      num_edge_count[0] = non_zero_rows;
-      std::vector<int64_t> sum_edge_count(10);
-      MPI_Reduce(num_edge_count.data(), sum_edge_count.data(),
-                 (int)num_edge_count.size(), MpiTypeOf<int64_t>::type, MPI_SUM,
-                 0, mpi.comm_2d);
-      if(mpi.isMaster()) {
-        for(int i = 0; i < (int)sum_edge_count.size(); ++i) {
-          if (i >= 1) {
-            sum_edge_count[i] = sum_edge_count[i - 1] - sum_edge_count[i];
-          }
-          print_with_prefix("#Vertices with more than %d neighbors: %ld", i,
-                            sum_edge_count[i]);
-        }
-      }
-    }
-#endif // #if VERVOSE_MODE
+    printLowDegreeVertexCounts(non_zero_rows, row_starts);
+#endif  // #if VERVOSE_MODE
 
     g.row_starts_ = row_starts;
 #if COMPRESS_ROW_STARTS
@@ -1622,94 +1556,6 @@ class GraphConstructor2DCSR {
 #endif  // #if VERVOSE_MODE
   }
 
-  // using SFINAE
-  // function #1
-  template <typename EdgeType>
-  void writeSendEdges(const EdgeType* edge_data, const int edge_data_length,
-                      int* restrict offsets, EdgeType* edges_to_send,
-                      typename EdgeType::has_weight dummy = 0) {
-    const int local_bits = org_local_bits_;
-#pragma omp for schedule(static)
-    for (int i = 0; i < edge_data_length; ++i) {
-      const int64_t v0 = edge_data[i].v0();
-      const int64_t v1 = edge_data[i].v1();
-      if (v0 == v1) continue;
-      const SeparatedId v0_src(vertex_owner_c(v0), vertex_local(v0),
-                               local_bits);
-      const SeparatedId v1_src(vertex_owner_c(v1), vertex_local(v1),
-                               local_bits);
-      const SeparatedId v0_dst(vertex_owner_r(v0), vertex_local(v0),
-                               local_bits);
-      const SeparatedId v1_dst(vertex_owner_r(v1), vertex_local(v1),
-                               local_bits);
-      // assert (offsets[edge_owner(v0,v1)] < 2 * FILE_CHUNKSIZE);
-      edges_to_send[(offsets[edge_owner(v0, v1)])++].set(
-          v0_src.value, v1_dst.value, edge_data[i].weight_);
-      // assert (offsets[edge_owner(v1,v0)] < 2 * FILE_CHUNKSIZE);
-      edges_to_send[(offsets[edge_owner(v1, v0)])++].set(
-          v1_src.value, v0_dst.value, edge_data[i].weight_);
-    }  // #pragma omp for schedule(static)
-  }
-
-  // function #2
-  template <typename EdgeType>
-  void writeSendEdges(const EdgeType* edge_data, const int edge_data_length,
-                      int* restrict offsets, EdgeType* edges_to_send,
-                      typename EdgeType::no_weight dummy = 0) {
-    const int local_bits = org_local_bits_;
-#pragma omp for schedule(static)
-    for (int i = 0; i < edge_data_length; ++i) {
-      const int64_t v0 = edge_data[i].v0();
-      const int64_t v1 = edge_data[i].v1();
-      if (v0 == v1) continue;
-      const SeparatedId v0_src(vertex_owner_c(v0), vertex_local(v0),
-                               local_bits);
-      const SeparatedId v1_src(vertex_owner_c(v1), vertex_local(v1),
-                               local_bits);
-      const SeparatedId v0_dst(vertex_owner_r(v0), vertex_local(v0),
-                               local_bits);
-      const SeparatedId v1_dst(vertex_owner_r(v1), vertex_local(v1),
-                               local_bits);
-      // assert (offsets[edge_owner(v0,v1)] < 2 * FILE_CHUNKSIZE);
-      edges_to_send[(offsets[edge_owner(v0, v1)])++].set(v0_src.value,
-                                                         v1_dst.value);
-      // assert (offsets[edge_owner(v1,v0)] < 2 * FILE_CHUNKSIZE);
-      edges_to_send[(offsets[edge_owner(v1, v0)])++].set(v1_src.value,
-                                                         v0_dst.value);
-    }  // #pragma omp for schedule(static)
-  }
-  /*
-          // using SFINAE
-          // function #1
-          template<typename EdgeType>
-          void addEdges(EdgeType* edges, int num_edges, GraphType& g, typename
-  EdgeType::has_weight dummy = 0)
-          {
-                  const int64_t L = g.num_local_verts_;
-                  const int lgl = local_bits_;
-                  const int log_local_src = local_bits_ +
-  get_msb_index(mpi.size_2dc-1) + 1; #pragma omp parallel for schedule(static)
-                  for(int i = 0; i < num_edges; ++i) {
-                          const SeparatedId v0(edges[i].v0());
-                          const SeparatedId v1(edges[i].v1());
-                          const int weight = edges[i].weight_;
-
-                          const int src_high = v0.compact(lgl, L) >>
-  LOG_EDGE_PART_SIZE; const uint16_t src_low = v0.compact(lgl, L) &
-  EDGE_PART_SIZE_MASK; const int64_t pos =
-  __sync_fetch_and_add(&wide_row_starts_[src_high], 1);
-
-                          // random access (write)
-  #ifndef NDEBUG
-                          assert( g.edge_array_[pos] == 0 );
-  #endif
-                          src_vertexes_[pos] = src_low;
-                          g.edge_array_[pos] = (weight << log_local_src) |
-  v1.value;
-                  }
-          }
-  */
-  // function #2
   void addEdges(int64_t* src_converted, int64_t* tgt_converted, int num_edges,
                 GraphType& g) {
     const int64_t L = g.num_local_verts_;
@@ -1889,11 +1735,10 @@ class GraphConstructor2DCSR {
 #endif
   };
 
-  void scatterAndStore(EdgeList* edge_list, GraphType& g) {
+  void scatterAndStore(EdgeList* sym_edge_list, GraphType& g) {
     TRACER(store_edge);
-    ScatterContext scatter(mpi.comm_2d);
-    EdgeType* edges_to_send = static_cast<EdgeType*>(
-        xMPI_Alloc_mem(2 * EdgeList::CHUNK_SIZE * sizeof(EdgeType)));
+    EdgeType* edges_to_add = static_cast<EdgeType*>(
+        cache_aligned_xmalloc(EdgeList::CHUNK_SIZE * sizeof(EdgeType)));
 
 #ifdef SMALL_REORDER_BIT
     g.edge_array_.high_ptr = (uint16_t*)cache_aligned_xcalloc(
@@ -1908,7 +1753,12 @@ class GraphConstructor2DCSR {
     src_vertexes_ = (uint16_t*)cache_aligned_xcalloc(
         wide_row_starts_[num_wide_rows_] * sizeof(uint16_t));
 
-    int num_loops = edge_list->beginRead(true);
+    int num_loops = sym_edge_list->beginRead(true);
+
+    int64_t* src_converted =
+        (int64_t*)cache_aligned_xmalloc(EdgeList::CHUNK_SIZE * sizeof(int64_t));
+    int64_t* tgt_converted =
+        (int64_t*)cache_aligned_xmalloc(EdgeList::CHUNK_SIZE * sizeof(int64_t));
 
     if (mpi.isMaster())
       print_with_prefix("Begin construction. Number of iterations is %d.",
@@ -1925,82 +1775,60 @@ class GraphConstructor2DCSR {
 
     for (int loop_count = 0; loop_count < num_loops; ++loop_count) {
       EdgeType* edge_data;
-      const int edge_data_length = edge_list->read(&edge_data);
+      const int edge_data_length = sym_edge_list->read(&edge_data);
 
-#pragma omp parallel
-      {
-        int* restrict counts = scatter.get_counts();
+      const int local_bits = org_local_bits_;
 
-#pragma omp for schedule(static)
-        for (int i = 0; i < edge_data_length; ++i) {
-          const int64_t v0 = edge_data[i].v0();
-          const int64_t v1 = edge_data[i].v1();
-          if (v0 == v1) continue;
-          (counts[edge_owner(v0, v1)])++;
-          (counts[edge_owner(v1, v0)])++;
-        }  // #pragma omp for schedule(static)
-      }  // #pragma omp parallel
-
-      scatter.sum();
-
-#pragma omp parallel
-      {
-        int* restrict offsets = scatter.get_offsets();
-        writeSendEdges(edge_data, edge_data_length, offsets, edges_to_send);
-      }
-
-      if (mpi.isMaster()) print_with_prefix("Scatter edges...");
-
-      INDEXED_BFS_LOG_RSS();
-      EdgeType* recv_edges = scatter.scatter(edges_to_send);
-      INDEXED_BFS_LOG_RSS();
-      const int num_recv_edges = scatter.get_recv_count();
-
-      int64_t* src_converted =
-          (int64_t*)cache_aligned_xmalloc(num_recv_edges * sizeof(int64_t));
-      int64_t* tgt_converted =
-          (int64_t*)cache_aligned_xmalloc(num_recv_edges * sizeof(int64_t));
-
-      if (mpi.isMaster()) print_with_prefix("Convert vertex id...");
+#pragma omp parallel for
+      for (int i = 0; i < edge_data_length; ++i) {
+        const int64_t v0 = edge_data[i].v0();
+        const int64_t v1 = edge_data[i].v1();
+        const SeparatedId v0_src(vertex_owner_c(v0), vertex_local(v0),
+                                 local_bits);
+        const SeparatedId v1_dst(vertex_owner_r(v1), vertex_local(v1),
+                                 local_bits);
+        edges_to_add[i] = EdgeType(v0_src.value, v1_dst.value);
+      }  // #pragma omp parallel for schedule(static)
 
 #ifdef SMALL_REORDER_BIT
-      MpiCol::gather(SourceConverter(recv_edges, src_converted, g.reorder_map_,
-                                     org_local_bits_, local_bits_,
-                                     reorder_bits_, g.num_group_verts_),
-                     num_recv_edges, mpi.comm_2dr);
+      MpiCol::gather(
+          SourceConverter(edges_to_add, src_converted, g.reorder_map_,
+                          org_local_bits_, local_bits_, reorder_bits_,
+                          g.num_group_verts_),
+          edge_data_length, mpi.comm_2dr);
 #else
-      MpiCol::gather(SourceConverter(recv_edges, src_converted, g.reorder_map_,
-                                     org_local_bits_, local_bits_),
-                     num_recv_edges, mpi.comm_2dr);
+      MpiCol::gather(
+          SourceConverter(edges_to_add, src_converted, g.reorder_map_,
+                          org_local_bits_, local_bits_),
+          edge_data_length, mpi.comm_2dr);
 #endif
 
 #ifdef SMALL_REORDER_BIT
       MpiCol::gather(
-          TargetConverter(recv_edges, tgt_converted, g.reorder_map_,
+          TargetConverter(edges_to_add, tgt_converted, g.reorder_map_,
                           org_local_bits_, local_bits_, g.r_bits_ + local_bits_,
                           reorder_bits_, g.num_group_verts_),
-          num_recv_edges, mpi.comm_2dc);
+          edge_data_length, mpi.comm_2dc);
 #else
-      MpiCol::gather(TargetConverter(recv_edges, tgt_converted, g.reorder_map_,
-                                     org_local_bits_, local_bits_,
-                                     g.r_bits_ + local_bits_),
-                     num_recv_edges, mpi.comm_2dc);
+      MpiCol::gather(TargetConverter(edges_to_add, tgt_converted,
+                                     g.reorder_map_, org_local_bits_,
+                                     local_bits_, g.r_bits_ + local_bits_),
+                     edge_data_length, mpi.comm_2dc);
 #endif
 
-      if (mpi.isMaster()) print_with_prefix("Add edges...");
-      addEdges(src_converted, tgt_converted, num_recv_edges, g);
-
-      free(src_converted);
-      free(tgt_converted);
-      scatter.free(recv_edges);
+      INDEXED_BFS_LOG_RSS();
+      addEdges(src_converted, tgt_converted, edge_data_length, g);
 
       if (mpi.isMaster())
-        print_with_prefix("Iteration %d finished.", loop_count);
+        print_with_prefix("[scatterAndStore] Completed %d/%d", loop_count + 1,
+                          num_loops);
       malloc_trim(0);
     }
 
-    edge_list->endRead();
-    MPI_Free_mem(edges_to_send);
+    free(src_converted);
+    free(tgt_converted);
+    sym_edge_list->endRead();
+    free(edges_to_add);
 
     if (mpi.isMaster()) print_with_prefix("Refreshing edge offset.");
     memmove(wide_row_starts_ + 1, wide_row_starts_,
@@ -2304,11 +2132,15 @@ DECODE(sort_v); g.edge_array_.set(idx, v);
   // const int cmask_;
   int log_local_verts_unit_;
   int64_t num_wide_rows_;
+  int64_t max_local_verts_;
+  int vertex_bits_;
 
   int org_local_bits_;  // local bits for original vertex id
   int local_bits_;      // local bits for reordered vertex id
 #ifdef SMALL_REORDER_BIT
-  int reorder_bits_;  // bits for reordering
+  int reorder_bits_;               // bits for reordering
+  int32_t max_local_group_verts_;  // max local group vertices
+  int64_t max_local_groups_;
 #endif
 
   DegreeCalculation* degree_calc_;
@@ -2316,7 +2148,7 @@ DECODE(sort_v); g.edge_array_.set(idx, v);
   uint16_t* src_vertexes_;
   int64_t* wide_row_starts_;
   int64_t* row_starts_sup_;
-};
+};  // namespace detail
 
 }  // namespace detail
 

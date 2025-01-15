@@ -335,8 +335,8 @@ void find_roots_in_large_graph(int root_start, int num_bfs_roots,
                                BfsOnCPU *benchmark, int64_t *bfs_roots,
                                int64_t *pred, int SCALE, int edgefactor,
                                int64_t auto_tuning_data[][AUTO_NUM],
-                               double alpha, double beta, double *perf) {
-  int r = 0;
+                               double alpha, double beta, double *perf, int seed = 0) {
+  int r = seed;
   find_roots(*benchmark, bfs_roots, num_bfs_roots, r++, 0);
   measure_performance(root_start, num_bfs_roots, benchmark, bfs_roots, pred,
                       SCALE, edgefactor, auto_tuning_data, alpha, beta, perf);
@@ -358,7 +358,7 @@ void find_roots_in_large_graph(int root_start, int num_bfs_roots,
   }
 }
 
-void auto_tuning(int root_start, int num_bfs_roots, BfsOnCPU *benchmark,
+double auto_tuning(int root_start, int num_bfs_roots, BfsOnCPU *benchmark, int seed,
                  int64_t *bfs_roots, int64_t *pred, int SCALE, int edgefactor,
                  double *alpha, double *beta) {
   int64_t auto_tuning_data[num_bfs_roots][AUTO_NUM];
@@ -366,7 +366,7 @@ void auto_tuning(int root_start, int num_bfs_roots, BfsOnCPU *benchmark,
 
   find_roots_in_large_graph(root_start, num_bfs_roots, benchmark, bfs_roots,
                             pred, SCALE, edgefactor, auto_tuning_data, *alpha,
-                            *beta, perf);
+                            *beta, perf, seed);
 
   while (auto_tuning_each(AUTO_ALPHA, root_start, num_bfs_roots, benchmark,
                           bfs_roots, pred, SCALE, edgefactor, auto_tuning_data,
@@ -386,11 +386,13 @@ void auto_tuning(int root_start, int num_bfs_roots, BfsOnCPU *benchmark,
     print_with_prefix(
         "Estimated Performance = %.0f MTEPS with Alpha = %f and Beta = %f",
         calc_TEPS(root_start, num_bfs_roots, perf) / 1000000, *alpha, *beta);
+
+  return calc_TEPS(root_start, num_bfs_roots, perf);
 }
 
-void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
+void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta, int root_seed,
                   int num_bfs_roots, int root_start, int validation_level,
-                  bool auto_tuning_enabled, bool corebfs_enabled, bool pre_exec,
+                  int auto_tuning_mode, bool corebfs_enabled, bool pre_exec,
                   bool real_benchmark) {
   using namespace PRM;
   SET_AFFINITY;
@@ -413,16 +415,26 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
   generation_time = MPI_Wtime() - generation_time;
 
   if (mpi.isMaster()) print_with_prefix("Graph construction");
+
+  //
+  // The result of `redistribute_edge_2d()` is used in the graph construction, and hence its
+  // processing time is considered to be part of `construction_time`.
+  //
+  double construction_time = MPI_Wtime();
+  // Prepare edge list
+  EdgeListStorage<UnweightedPackedEdge> sym_edge_list(
+      (int64_t(1) << SCALE) * edgefactor / mpi.size_2d * 2, getenv("TMPFILE"), "-sym");
+  if (mpi.isMaster()) print_with_prefix("Distributing edge list...");
+  redistribute_edge_2d(&edge_list);
+  if (mpi.isMaster()) print_with_prefix("Making symmetry edge list...");
+  const auto estimated_scale = make_symmetry_edge_list(&edge_list, &sym_edge_list);
+
   // Create BFS instance and the *COMMUNICATION THREAD*.
   BfsOnCPU *benchmark = new BfsOnCPU();
-  double construction_time = MPI_Wtime();
-  benchmark->construct(SCALE, edgefactor, corebfs_enabled, &edge_list);
+  benchmark->construct(estimated_scale, corebfs_enabled, &sym_edge_list);
   construction_time = MPI_Wtime() - construction_time;
 
-  if (mpi.isMaster()) print_with_prefix("Redistributing edge list...");
-  double redistribution_time = MPI_Wtime();
-  redistribute_edge_2d(&edge_list);
-  redistribution_time = MPI_Wtime() - redistribution_time;
+  double redistribution_time = 0.0;
 
   int64_t bfs_roots[num_bfs_roots];
   const int64_t max_used_vertex = find_max_used_vertex(benchmark->graph_);
@@ -457,12 +469,12 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
     }
   }
 #endif
-  if (auto_tuning_enabled == false) {
+  if (auto_tuning_mode == 0) {
     int64_t auto_tuning_data[num_bfs_roots][AUTO_NUM];  // not used
     double perf[num_bfs_roots];                         // not used
     find_roots_in_large_graph(root_start, num_bfs_roots, benchmark, bfs_roots,
                               pred, SCALE, edgefactor, auto_tuning_data, alpha,
-                              beta, perf);
+                              beta, perf, root_seed);
   } else {
     if (SCALE > 43) {
       if (mpi.isMaster()) {
@@ -475,7 +487,28 @@ void graph500_bfs(int SCALE, int edgefactor, double alpha, double beta,
     MPI_Barrier(mpi.comm_2d);
     double elapsed_time = MPI_Wtime();
 
-    auto_tuning(root_start, num_bfs_roots, benchmark, bfs_roots, pred, SCALE,
+    int find_root_seed = root_seed;
+    
+    if(auto_tuning_mode == 2) {
+      const int num_seed_trials = 100;
+      double max_teps = 0.0;
+      double search_alpha = alpha, search_beta = beta;
+      for(int i = 0; i < num_seed_trials; ++i) {
+        double rndd = 0.0;
+        if(i > 0) make_random_numbers(1, USERSEED1, USERSEED2, i, &rndd);
+        const auto seed = (int)(rndd * (1 << 24));
+        if(mpi.isMaster()) print_with_prefix("Trial seed %d/%d Seed: %d", i + 1, num_seed_trials, seed);
+        const auto teps = auto_tuning(root_start, num_bfs_roots, benchmark, seed, bfs_roots, pred, SCALE,
+                    edgefactor, &search_alpha, &search_beta);
+        if(teps > max_teps) {
+          find_root_seed = seed;
+          max_teps = teps;
+        }
+      }
+      if(mpi.isMaster()) print_with_prefix("Found seed %d", find_root_seed);
+    }
+
+    auto_tuning(root_start, num_bfs_roots, benchmark, find_root_seed, bfs_roots, pred, SCALE,
                 edgefactor, &alpha, &beta);
 
     if (mpi.isMaster())
@@ -721,10 +754,12 @@ Options:
   -e <edge factor>    Set an edge factor
   -a <alpha>          Set alpha
   -b <beta>           Set beta
+  -r <root_seed>      Set the seed to find roots
   -n <count>          Set the number of search keys
   -s <count>          Skip the specified number of search keys
   -v <level>          Validation level
   -A                  Enable auto-tuning of alpha and beta
+  -S                  Enable root seed searching
   -C                  Enable CoreBFS
   -P                  Enable pre-execution
   -R                  Set options at once as specified in the Graph500 spec.
@@ -738,12 +773,12 @@ Validation levels:
 }
 
 static void set_args(const int argc, char **argv, int *edge_factor,
-                     double *alpha, double *beta, int *num_bfs_roots,
+                     double *alpha, double *beta, int *root_seed, int *num_bfs_roots,
                      int *root_start, int *validation_level,
-                     bool *auto_tuning_enabled, bool *corebfs_enabled,
+                     int *auto_tuning_mode, bool *corebfs_enabled,
                      bool *pre_exec, bool *real_benchmark) {
   int result;
-  while ((result = getopt(argc, argv, "e:a:b:n:s:v:ACPR")) != -1) {
+  while ((result = getopt(argc, argv, "e:a:b:r:n:s:v:ASCPR")) != -1) {
     switch (result) {
       case 'e':
         *edge_factor = atoi(optarg);
@@ -756,6 +791,9 @@ static void set_args(const int argc, char **argv, int *edge_factor,
       case 'b':
         *beta = atof(optarg);
         if (*beta <= 0) ERROR("-b value > 0\n");
+        break;
+      case 'r':
+        *root_seed = atoi(optarg);
         break;
       case 'n':
         *num_bfs_roots = atoi(optarg);
@@ -771,7 +809,10 @@ static void set_args(const int argc, char **argv, int *edge_factor,
           ERROR("-v value >= 0 && value <= 2\n");
         break;
       case 'A':
-        *auto_tuning_enabled = true;
+        *auto_tuning_mode = 1;
+        break;
+      case 'S':
+        *auto_tuning_mode = 2;
         break;
       case 'C':
         *corebfs_enabled = true;
@@ -796,31 +837,32 @@ int main(int argc, char **argv) {
       DEFAULT_EDGE_FACTOR;  // nedges / nvertices, i.e., 2*avg. degree
   double alpha = DEFAULT_ALPHA;
   double beta = DEFAULT_BETA;
+  int root_seed = 0;
   int num_bfs_roots = TEST_BFS_ROOTS;
   int root_start = 0;
   int validation_level = DEFAULT_VALIDATION_LEVEL;
-  bool auto_tuning_enabled = false;
+  int auto_tuning_mode = DEFAULT_AUTO_TUNING_MODE;
   bool corebfs_enabled = false;
   bool real_benchmark = false;
   bool pre_exec = false;
 
-  set_args(argc, argv, &edge_factor, &alpha, &beta, &num_bfs_roots, &root_start,
-           &validation_level, &auto_tuning_enabled, &corebfs_enabled, &pre_exec,
+  set_args(argc, argv, &edge_factor, &alpha, &beta, &root_seed, &num_bfs_roots, &root_start,
+           &validation_level, &auto_tuning_mode, &corebfs_enabled, &pre_exec,
            &real_benchmark);
   if (real_benchmark) {
     num_bfs_roots = REAL_BFS_ROOTS;
     validation_level = 2;
     pre_exec = true;
   }
-  if (root_start != 0 && auto_tuning_enabled){
+  if (root_start != 0 && auto_tuning_mode){
     // Please refer to #37
     // https://github.com/RIKEN-RCCS/Graph500-BFS-private/issues/37
     ERROR("-s and -A are not available at the same time.\n");
   }
 
   setup_globals(argc, argv, scale, edge_factor);
-  graph500_bfs(scale, edge_factor, alpha, beta, num_bfs_roots, root_start,
-               validation_level, auto_tuning_enabled, corebfs_enabled, pre_exec,
+  graph500_bfs(scale, edge_factor, alpha, beta, root_seed, num_bfs_roots, root_start,
+               validation_level, auto_tuning_mode, corebfs_enabled, pre_exec,
                real_benchmark);
   cleanup_globals();
 

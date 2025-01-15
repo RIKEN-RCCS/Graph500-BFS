@@ -92,6 +92,7 @@
 #define PRINT_BT_SIGNAL SIGTRAP
 
 #define DEFAULT_VALIDATION_LEVEL 2
+#define DEFAULT_AUTO_TUNING_MODE 0
 #define DEFAULT_EDGE_FACTOR 16
 #define DEFAULT_ALPHA 10.0        // Top-down to Bottom-up
 #define DEFAULT_BETA 14.0         // Bootom-up to Top-down

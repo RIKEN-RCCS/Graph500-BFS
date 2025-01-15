@@ -114,8 +114,8 @@ class BfsBase {
   }
 
   template <typename EdgeList>
-  void construct(const int scale, const int edgefactor,
-                 const bool corebfs_enabled, EdgeList* edge_list) {
+  void construct(const int scale, const bool corebfs_enabled,
+                 EdgeList* sym_edge_list) {
     // minimun requirement of CQ
     // CPU: MINIMUN_SIZE_OF_CQ_BITMAP words -> MINIMUN_SIZE_OF_CQ_BITMAP *
     // NUMBER_PACKING_EDGE_LISTS * mpi.size_2dc GPU: THREADS_PER_BLOCK words ->
@@ -124,26 +124,18 @@ class BfsBase {
     int log_local_verts_unit =
         get_msb_index(std::max<int>(BFELL_SORT, NBPE) * 8);
     detail::GraphConstructor2DCSR<EdgeList> constructor;
-
     if (!corebfs_enabled) {
-      constructor.construct(edge_list, log_local_verts_unit, graph_);
+      constructor.construct(scale, sym_edge_list, log_local_verts_unit, graph_);
       return;
     }
 
     // Create temporary EdgeListStrorage for storing core edges
-    const int64_t n_edges = (int64_t(1) << scale) * edgefactor / mpi.size_2d;
-    std::string path;
-    const char* path_ptr = nullptr;
-    if (getenv("TMPFILE") != nullptr) {
-      path = path + getenv("TMPFILE") + "-core";
-      path_ptr = path.c_str();
-    }
-    EdgeListStorage<UnweightedPackedEdge> core_edge_list(n_edges, path_ptr);
+    EdgeListStorage<UnweightedPackedEdge> core_edge_list(
+        sym_edge_list->num_local_edges(), getenv("TMPFILE"), "-core");
 
-    corebfs_ = corebfs_adaptor::preprocess(scale, edge_list, &core_edge_list);
-    INDEXED_BFS_LOG_RSS(); // Print in the outside of `preprocess()`'s scope
-
-    constructor.construct(&core_edge_list, log_local_verts_unit, graph_);
+    corebfs_ =
+        corebfs_adaptor::preprocess(scale, sym_edge_list, &core_edge_list);
+    constructor.construct(scale, &core_edge_list, log_local_verts_unit, graph_);
   }
 
   void prepare_bfs(int validation_level, bool pre_exec, bool real_benchmark,
@@ -1225,18 +1217,9 @@ class BfsBase {
 #endif  // #if ISOLATE_FIRST_EDGE
 
 #if COMPRESS_ROW_STARTS
-            BitmapType sub_row_bitmap_i =
-                graph_.sub_row_map_.row_bitmap_[word_idx];
-            BitmapType sub_bit_flags = cq_bit & sub_row_bitmap_i;
-            if (sub_bit_flags == BitmapType(0)) {  // e_start == e_end?
-              continue;
-            }
-            TwodVertex non_zero_sub_off =
-                graph_.sub_row_map_.row_sums_[word_idx] +
-                __builtin_popcountl(graph_.sub_row_map_.row_bitmap_[word_idx] &
-                                    low_mask);
-            auto e_start = graph_.sub_row_map_.row_starts_[non_zero_sub_off];
-            auto e_end = graph_.sub_row_map_.row_starts_[non_zero_sub_off + 1];
+            const auto e_range = graph_.sub_row_map_.GetEdgeRange(non_zero_off);
+            const auto e_start = e_range.first;
+            const auto e_end = e_range.second;
 #else
             int64_t e_start = graph_.row_starts_[non_zero_off];
             int64_t e_end = graph_.row_starts_[non_zero_off + 1];
@@ -1264,7 +1247,7 @@ class BfsBase {
 #endif  // #if TOP_DOWN_SEND_LB != 1
             VERVOSE(num_edge_relax += e_end - e_start + 1);
           }  // while(bit_flags != BitmapType(0)) {
-        }  // #pragma omp for // implicit barrier
+        }    // #pragma omp for // implicit barrier
       } else {
         TwodVertex* cq_list = (TwodVertex*)cq_list_;
 
@@ -1308,19 +1291,9 @@ class BfsBase {
 #endif  // #if ISOLATE_FIRST_EDGE
 
 #if COMPRESS_ROW_STARTS
-            BitmapType sub_row_bitmap_i =
-                graph_.sub_row_map_.row_bitmap_[word_idx];
-            if ((sub_row_bitmap_i & mask) == 0) {  // e_start == e_end?
-              continue;
-            }
-            TwodVertex non_zero_sub_off =
-                graph_.sub_row_map_.row_sums_[word_idx] +
-                __builtin_popcountl(graph_.sub_row_map_.row_bitmap_[word_idx] &
-                                    low_mask);
-            uint32_t e_start =
-                graph_.sub_row_map_.row_starts_[non_zero_sub_off];
-            uint32_t e_end =
-                graph_.sub_row_map_.row_starts_[non_zero_sub_off + 1];
+            const auto e_range = graph_.sub_row_map_.GetEdgeRange(non_zero_off);
+            const auto e_start = e_range.first;
+            const auto e_end = e_range.second;
 #else
             int64_t e_start = graph_.row_starts_[non_zero_off];
             int64_t e_end = graph_.row_starts_[non_zero_off + 1];
@@ -1349,7 +1322,7 @@ class BfsBase {
 #endif  // #if TOP_DOWN_SEND_LB != 1
             VERVOSE(num_edge_relax += e_end - e_start + 1);
           }  // if(row_bitmap_i & mask) {
-        }  // #pragma omp for // implicit barrier
+        }    // #pragma omp for // implicit barrier
       }
 
       // flush buffer
@@ -2233,10 +2206,6 @@ class BfsBase {
     const int64_t* __restrict__ isolated_edges = graph_.isolated_edges_;
 #endif
 #if COMPRESS_ROW_STARTS
-    const uint32_t* __restrict__ row_starts = graph_.sub_row_map_.row_starts_;
-    const BitmapType* __restrict__ sub_row_bitmap =
-        graph_.sub_row_map_.row_bitmap_;
-    const TwodVertex* __restrict__ sub_row_sums = graph_.sub_row_map_.row_sums_;
 #else
     const int64_t* __restrict__ row_starts = graph_.row_starts_;
 #endif  // #if COMPRESS_ROW_STARTS
@@ -2264,25 +2233,12 @@ class BfsBase {
       TwodVertex bmp_row_sums = *(row_sums + phase_bmp_off + blk_bmp_off);
       BitmapType bit_flags = (~visited_i) & row_bmp_i;
 
-#if COMPRESS_ROW_STARTS
-      BitmapType sub_row_bmp_i =
-          *(sub_row_bitmap + phase_bmp_off + blk_bmp_off);
-      TwodVertex bmp_sub_row_sums =
-          *(sub_row_sums + phase_bmp_off + blk_bmp_off);
-#endif  // #if COMPRESS_ROW_STARTS
-
       while (bit_flags != BitmapType(0)) {
         BitmapType vis_bit = bit_flags & (-bit_flags);
         BitmapType mask = vis_bit - 1;
         bit_flags &= ~vis_bit;
         TwodVertex non_zero_idx =
             bmp_row_sums + __builtin_popcountl(row_bmp_i & mask);
-
-#if COMPRESS_ROW_STARTS
-        TwodVertex non_zero_sub_idx =
-            bmp_sub_row_sums + __builtin_popcountl(sub_row_bmp_i & mask);
-        BitmapType sub_bit_flags = vis_bit & sub_row_bmp_i;
-#endif  // #if COMPRESS_ROW_STARTS
 
 #ifdef SMALL_REORDER_BIT
         int tgt_bit_idx = __builtin_ctzll(vis_bit);
@@ -2330,12 +2286,9 @@ class BfsBase {
           continue;
         }
 #if COMPRESS_ROW_STARTS
-        if (sub_bit_flags == BitmapType(0)) {  // e_start == e_end?
-          continue;
-        }
-
-        auto e_start = row_starts[non_zero_sub_idx];
-        auto e_end = row_starts[non_zero_sub_idx + 1];
+        const auto e_range = graph_.sub_row_map_.GetEdgeRange(non_zero_idx);
+        const auto e_start = e_range.first;
+        const auto e_end = e_range.second;
 #else
         auto e_start = row_starts[non_zero_idx];
         auto e_end = row_starts[non_zero_idx + 1];
@@ -2634,22 +2587,9 @@ class BfsBase {
 #endif  // #if ISOLATE_FIRST_EDGE
 
 #if COMPRESS_ROW_STARTS
-          TwodVertex* phase_sub_row_sums =
-              graph_.sub_row_map_.row_sums_ + phase_bmp_off;
-          BitmapType* phase_sub_row_bitmap =
-              graph_.sub_row_map_.row_bitmap_ + phase_bmp_off;
-          BitmapType sub_row_bitmap_i = phase_sub_row_bitmap[word_idx];
-          if ((sub_row_bitmap_i & vis_bit) ==
-              BitmapType(0)) {  // e_start == e_end?
-            continue;
-          }
-
-          TwodVertex non_zero_sub_idx =
-              phase_sub_row_sums[word_idx] +
-              __builtin_popcountl(sub_row_bitmap_i & (vis_bit - 1));
-          uint32_t e_start = graph_.sub_row_map_.row_starts_[non_zero_sub_idx];
-          uint32_t e_end =
-              graph_.sub_row_map_.row_starts_[non_zero_sub_idx + 1];
+          const auto e_range = graph_.sub_row_map_.GetEdgeRange(non_zero_idx);
+          const auto e_start = e_range.first;
+          const auto e_end = e_range.second;
 #else
           int64_t e_start = graph_.row_starts_[non_zero_idx];
           int64_t e_end = graph_.row_starts_[non_zero_idx + 1];
@@ -2741,9 +2681,10 @@ class BfsBase {
 #if 1  // which one is faster ?
     int recv_count[mpi.size_2dc];
     for (int i = 0; i < mpi.size_2dc; ++i) recv_count[i] = 1;
-    MPI_Reduce_scatter(visited_count, &nq_size_, recv_count, MpiTypeOf<int64_t>::type, MPI_SUM,
-                       mpi.comm_2dr);
-    MPI_Allreduce(&nq_size_, &max_nq_size_, 1, MpiTypeOf<int64_t>::type, MPI_MAX, mpi.comm_2d);
+    MPI_Reduce_scatter(visited_count, &nq_size_, recv_count,
+                       MpiTypeOf<int64_t>::type, MPI_SUM, mpi.comm_2dr);
+    MPI_Allreduce(&nq_size_, &max_nq_size_, 1, MpiTypeOf<int64_t>::type,
+                  MPI_MAX, mpi.comm_2d);
 #ifdef PROFILE_REGIONS
     timer_stop(IMBALANCE_TIME);
 #endif
