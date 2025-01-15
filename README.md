@@ -3,20 +3,19 @@
 This is a Graph500 benchmark program developed for the K computer and its successor, the supercomputer Fugaku, in Japan.
 Please cite the following paper if you use our code:
 
-- Junya Arai, Masahiro Nakao, Yuto Inoue, Kanto Teranishi, Koji Ueno, Keiichiro Yamamura, Mitsuhisa Sato, and Katsuki Fujisawa, "Doubling Graph Traversal Efficiency to 198 TeraTEPS on the Supercomputer Fugaku," in SC24: International Conference for High Performance Computing, Networking, Storage and Analysis, 2024.
+- Junya Arai, Masahiro Nakao, Yuto Inoue, Kanto Teranishi, Koji Ueno, Keiichiro Yamamura, Mitsuhisa Sato, and Katsuki Fujisawa, "Doubling Graph Traversal Efficiency to 198 TeraTEPS on the Supercomputer Fugaku," SC24: International Conference for High Performance Computing, Networking, Storage and Analysis, 2024, pp. 1-14, doi: [10.1109/SC41406.2024.00107](https://doi.org/10.1109/SC41406.2024.00107).
 
 Our previous publications are listed below (from most recent to oldest):
 
-- Masahiro Nakao, Koji Ueno, Katsuki Fujisawa, Yuetsu Kodama, and Mitsuhisa, Sato, "Performance of the Supercomputer Fugaku for Breadth-First Search in Graph500 Benchmark," in High Performance Computing:
-36th International Conference, ISC High Performance 2021, 2021, pp. 372-390.
-- Koji Ueno, Toyotaro Suzumura, Naoya Maruyama, Katsuki Fujisawa, Satoshi Matsuoka, "Efficient Breadth-First Search on Massively Parallel and Distributed-Memory Machines," Data Science and Engineering, vol. 2, no. 1, pp. 22-35, 2017.
-- Koji Ueno, Toyotaro Suzumura, Naoya Maruyama, Katsuki Fujisawa, Satoshi Matsuoka. "Extreme Scale Breadth-First Search on Supercomputers". in 2016 IEEE International Conference on Big Data (Big Data), 2016, pp. 1040-1047.
+- Masahiro Nakao, Koji Ueno, Katsuki Fujisawa, Yuetsu Kodama, and Mitsuhisa Sato, "Performance of the Supercomputer Fugaku for Breadth-First Search in Graph500 Benchmark," in High Performance Computing: 36th International Conference, ISC High Performance 2021, 2021, pp. 372-390, doi: [10.1007/978-3-030-78713-4\_20](https://doi.org/10.1007/978-3-030-78713-4_20).
+- Koji Ueno, Toyotaro Suzumura, Naoya Maruyama, Katsuki Fujisawa, and Satoshi Matsuoka, "Efficient Breadth-First Search on Massively Parallel and Distributed-Memory Machines," Data Science and Engineering, vol. 2, no. 1, pp. 22-35, 2017, doi: [10.1007/s41019-016-0024-y](https://doi.org/10.1007/s41019-016-0024-y).
+- Koji Ueno, Toyotaro Suzumura, Naoya Maruyama, Katsuki Fujisawa, and Satoshi Matsuoka, "Extreme Scale Breadth-First Search on Supercomputers," 2016 IEEE International Conference on Big Data (Big Data), 2016, pp. 1040-1047, doi: [10.1109/BigData.2016.7840705](https://doi.org/10.1109/BigData.2016.7840705).
 
 The code is licensed under the Apache License, Version 2.0.
 
 ## How to Use
 
-While this program performs best on the supercomputer Fugaku, you can test it on an x86_64 Linux server.
+While this program performs best on the supercomputer Fugaku, you can test it on an x86\_64 Linux server.
 For technical details, please refer to our papers listed above.
 
 ### Tested Environment
